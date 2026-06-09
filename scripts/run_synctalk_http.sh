@@ -17,4 +17,6 @@ PYTHON_BIN="${SYNCTALK_PYTHON:-/home/admin-aifc/miniforge3/envs/synctalk2d/bin/p
 PORT="${SYNCTALK_HTTP_PORT:-8005}"
 
 exec env SYNCTALK_AVATAR="${SYNCTALK_AVATAR:-aifc-avatar-5-exp-5-v3}" \
+  SYNCTALK_MAX_FRAMES="${SYNCTALK_MAX_FRAMES:-64}" \
+  SYNCTALK_MAX_WAIT_S="${SYNCTALK_MAX_WAIT_S:-0.015}" \
   "$PYTHON_BIN" "$SYNCTALK_DIR/synctalk_server.py" --port "$PORT"

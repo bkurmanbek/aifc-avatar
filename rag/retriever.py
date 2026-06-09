@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from .model_loader import embedder
-from .qdrant import client
 from .settings import (
     EMBEDDING_BATCH_SIZE,
     QDRANT_COLLECTION,
     RAG_ANN_TOP_K,
     RAG_MIN_ANN_SCORE,
+    RAG_VECTOR_BACKEND,
 )
 
 
@@ -34,8 +34,9 @@ def embed_query(query: str) -> list[float]:
     return embed_texts([query])[0]
 
 
-def retrieve_candidates(query: str, top_k: int = RAG_ANN_TOP_K) -> list[dict]:
-    vector = embed_query(query)
+def _retrieve_qdrant(vector: list[float], top_k: int) -> list[dict]:
+    from .qdrant import client
+
     points = client().query_points(
         collection_name=QDRANT_COLLECTION,
         query=vector,
@@ -56,3 +57,14 @@ def retrieve_candidates(query: str, top_k: int = RAG_ANN_TOP_K) -> list[dict]:
             }
         )
     return candidates
+
+
+def retrieve_candidates(query: str, top_k: int = RAG_ANN_TOP_K) -> list[dict]:
+    vector = embed_query(query)
+    if RAG_VECTOR_BACKEND == "faiss":
+        from .faiss_store import search
+
+        return search(vector, top_k=top_k, min_score=RAG_MIN_ANN_SCORE)
+    if RAG_VECTOR_BACKEND == "qdrant":
+        return _retrieve_qdrant(vector, top_k=top_k)
+    raise RuntimeError(f"Unsupported RAG_VECTOR_BACKEND={RAG_VECTOR_BACKEND!r}")

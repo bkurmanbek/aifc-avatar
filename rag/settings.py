@@ -26,6 +26,11 @@ QDRANT_PATH = Path(os.getenv("QDRANT_PATH", str(DATA_DIR / "vector_db"))).expand
 QDRANT_MODE = os.getenv("QDRANT_MODE", "local").lower()
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "aifc_chunks")
 QDRANT_VECTOR_SIZE = env_int("QDRANT_VECTOR_SIZE", 1024)
+RAG_VECTOR_BACKEND = os.getenv("RAG_VECTOR_BACKEND", "faiss").strip().lower()
+FAISS_INDEX_PATH = Path(os.getenv("FAISS_INDEX_PATH", str(DATA_DIR / "faiss" / "aifc_chunks.index"))).expanduser().resolve()
+FAISS_METADATA_PATH = Path(
+    os.getenv("FAISS_METADATA_PATH", str(DATA_DIR / "faiss" / "aifc_chunks.metadata.json"))
+).expanduser().resolve()
 RAG_ANN_TOP_K = env_int("RAG_ANN_TOP_K", 20)
 RAG_FINAL_TOP_K = env_int("RAG_FINAL_TOP_K", 5)
 RAG_MIN_ANN_SCORE = env_float("RAG_MIN_ANN_SCORE", 0.50)

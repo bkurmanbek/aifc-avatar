@@ -3,7 +3,7 @@ scripts/processing/reindex.py — Rebuild the Qdrant vector index for AIFC RAG u
 
 Drops the existing collection and creates a fresh 1024-dim one,
 then embeds chunks from one or more data/chunks/*.json files and upserts them
-into the Qdrant DB at data/vector_db/.
+into Qdrant using QDRANT_MODE/QDRANT_URL from the environment.
 
 Usage (from project root):
     python scripts/processing/reindex.py
@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from dotenv import load_dotenv
 from transformers import AutoModel, AutoTokenizer
 import transformers.modeling_utils as _transformers_modeling_utils
 from transformers.utils import import_utils as _transformers_import_utils
@@ -38,12 +39,15 @@ _transformers_import_utils.check_torch_load_is_safe = lambda: None
 
 # Project root is 2 levels up from scripts/processing/
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(PROJECT_ROOT / ".env")
 DATA_DIR     = Path(os.getenv("AIFC_DATA_DIR", os.getenv("DATA_DIR", str(PROJECT_ROOT.parent / "data")))).expanduser().resolve()
 
-QDRANT_PATH     = DATA_DIR / "vector_db"
-COLLECTION_NAME = "aifc_chunks"
-EMBED_DIM       = 1024
-BATCH_SIZE      = 32
+QDRANT_PATH       = Path(os.getenv("QDRANT_PATH", str(DATA_DIR / "vector_db"))).expanduser().resolve()
+QDRANT_MODE       = os.getenv("QDRANT_MODE", "server").strip().lower()
+QDRANT_URL        = os.getenv("QDRANT_URL", "http://localhost:6333")
+COLLECTION_NAME   = os.getenv("QDRANT_COLLECTION", "aifc_chunks")
+EMBED_DIM         = int(os.getenv("QDRANT_VECTOR_SIZE", "1024"))
+BATCH_SIZE        = 32
 
 MODELS_DIR = Path(os.getenv("MODELS_DIR", str(Path.home() / "models")))
 BGE_MODEL_PATH  = str(MODELS_DIR / "bge-m3")
@@ -295,6 +299,13 @@ def rebuild_collection(client: QdrantClient) -> None:
     )
 
 
+def qdrant_client() -> QdrantClient:
+    if QDRANT_MODE == "local":
+        QDRANT_PATH.mkdir(parents=True, exist_ok=True)
+        return QdrantClient(path=str(QDRANT_PATH))
+    return QdrantClient(url=QDRANT_URL)
+
+
 def upsert_points(
     client: QdrantClient,
     chunks: list[dict],
@@ -387,7 +398,7 @@ def main() -> None:
         print(f"[reindex] Embedding complete: {(time.perf_counter()-t_embed)*1000:.0f}ms", file=sys.stderr)
 
     # Rebuild Qdrant
-    client = QdrantClient(path=str(QDRANT_PATH))
+    client = qdrant_client()
     rebuild_collection(client)
     upsert_points(client, chunks, vectors, args.batch_size, args.verbose)
     client.close()
