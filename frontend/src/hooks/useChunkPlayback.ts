@@ -3,9 +3,6 @@ import { useRef, useCallback, useEffect } from 'react'
 import type { ChunkState } from '../types'
 import { FPS, CANVAS_W, CANVAS_H, CHUNK_GAP_HOLD_MS } from '../constants'
 
-const FIRST_CHUNK_MIN_START_FRAMES = 3
-const TAIL_CHUNK_MIN_START_FRAMES = 2
-const AUDIO_ONLY_FALLBACK_MS = 1200
 const LIVE_FRAME_HEADROOM_S = 0.14
 
 export interface PlaybackCallbacks {
@@ -33,7 +30,6 @@ export function useChunkPlayback(
   const isPlayingRef = useRef(false)
   const hideSpeakTimerRef = useRef<number | null>(null)
   const chunkGapTimerRef = useRef<number | null>(null)
-  const audioFallbackTimersRef = useRef<Record<number, number>>({})
   const streamActiveRef = useRef(false)
   const firstRenderReportedRef = useRef<Record<string, boolean>>({})
 
@@ -87,8 +83,6 @@ export function useChunkPlayback(
     streamActiveRef.current = false
     if (hideSpeakTimerRef.current) window.clearTimeout(hideSpeakTimerRef.current)
     if (chunkGapTimerRef.current) window.clearTimeout(chunkGapTimerRef.current)
-    Object.values(audioFallbackTimersRef.current).forEach((timer) => window.clearTimeout(timer))
-    audioFallbackTimersRef.current = {}
     if (currentSrcRef.current) {
       try { currentSrcRef.current.stop() } catch { /* ignore */ }
       currentSrcRef.current = null
@@ -104,11 +98,9 @@ export function useChunkPlayback(
     if (!chunksRef.current[idx]) chunksRef.current[idx] = { audio: null, frames: [], frameDone: false, frameStride: 1 }
   }, [])
 
-  const isChunkReadyToPlay = useCallback((idx: number, ch: ChunkState | undefined) => {
+  const isChunkReadyToPlay = useCallback((_idx: number, ch: ChunkState | undefined) => {
     if (!ch?.audio) return false
-    if (ch.frameDone) return ch.frames.length > 0 || ch.audio !== null
-    const minFrames = idx === 0 ? FIRST_CHUNK_MIN_START_FRAMES : TAIL_CHUNK_MIN_START_FRAMES
-    return ch.frames.length >= minFrames
+    return true
   }, [])
 
   const chunkDone = useCallback((idx: number) => {
@@ -148,10 +140,6 @@ export function useChunkPlayback(
   const playChunk = useCallback(async (idx: number) => {
     const ch = chunksRef.current[idx]
     if (!ch?.audio) return
-    if (audioFallbackTimersRef.current[idx]) {
-      window.clearTimeout(audioFallbackTimersRef.current[idx])
-      delete audioFallbackTimersRef.current[idx]
-    }
     isPlayingRef.current = true
     cbRef.current.onChunkPlaybackStart?.(idx)
     cbRef.current.setMode('speaking')
@@ -281,18 +269,7 @@ export function useChunkPlayback(
     chunksRef.current[idx].frameStride = Math.max(1, frameStride)
     if (turnId) chunksRef.current[idx].turnId = turnId
     maybePlayNext()
-    if (!audioFallbackTimersRef.current[idx]) {
-      audioFallbackTimersRef.current[idx] = window.setTimeout(() => {
-        delete audioFallbackTimersRef.current[idx]
-        if (isPlayingRef.current || idx !== nextPlayChunkRef.current) return
-        const ch = chunksRef.current[idx]
-        if (ch?.audio && ch.frames.length === 0 && !ch.frameDone) {
-          ch.frameDone = true
-          void playChunk(idx)
-        }
-      }, AUDIO_ONLY_FALLBACK_MS)
-    }
-  }, [ensureChunk, maybePlayNext, playChunk])
+  }, [ensureChunk, maybePlayNext])
 
   const onFrame = useCallback((idx: number, b64: string, turnId?: string) => {
     ensureChunk(idx)
