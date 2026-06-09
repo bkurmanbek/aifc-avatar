@@ -1,0 +1,591 @@
+{
+  "term_groups": {
+    "core_entities": [
+      {
+        "abbr": "AIFC",
+        "en": "Astana International Financial Centre",
+        "ru": "Международный финансовый центр «Астана»",
+        "kk": "Астана Халықаралық Қаржы Орталығы",
+        "aliases": [
+          "МФЦА",
+          "АХҚО"
+        ]
+      },
+      {
+        "abbr": "МФЦА",
+        "en": "Astana International Financial Centre",
+        "ru": "Международный финансовый центр «Астана»",
+        "kk": "Астана Халықаралық Қаржы Орталығы",
+        "aliases": [
+          "AIFC",
+          "АХҚО"
+        ]
+      },
+      {
+        "abbr": "АХҚО",
+        "en": "Astana International Financial Centre",
+        "ru": "Международный финансовый центр «Астана»",
+        "kk": "Астана Халықаралық Қаржы Орталығы",
+        "aliases": [
+          "AIFC",
+          "МФЦА"
+        ]
+      },
+      {
+        "abbr": "AFSA",
+        "en": "Astana Financial Services Authority",
+        "ru": "Комитет МФЦА по регулированию финансовых услуг",
+        "kk": "АХҚО Қаржылық қызметтер көрсетуді реттеу жөніндегі комитеті",
+        "aliases": [
+          "АФСА"
+        ]
+      },
+      {
+        "abbr": "AIFCA",
+        "en": "AIFC Authority",
+        "ru": "Администрация МФЦА",
+        "kk": "АХҚО әкімшілігі",
+        "aliases": []
+      },
+      {
+        "abbr": "AIX",
+        "en": "Astana International Exchange",
+        "ru": "Астанинская международная биржа",
+        "kk": "Астана Халықаралық Биржасы",
+        "aliases": []
+      },
+      {
+        "abbr": "AEC",
+        "en": "AIFC Expat Centre",
+        "ru": "Экспат центр МФЦА",
+        "kk": "АХҚО Экспат орталығы",
+        "aliases": []
+      },
+      {
+        "abbr": "IAC",
+        "en": "AIFC International Arbitration Centre",
+        "ru": "Международный арбитражный центр МФЦА",
+        "kk": "АХҚО Халықаралық Арбитраж Орталығы",
+        "aliases": []
+      }
+    ],
+    "financial_legal": [
+      {
+        "abbr": "AML",
+        "en": "Anti-Money Laundering",
+        "ru": "Противодействие отмыванию денег",
+        "kk": "Ақшаны жылыстатуға қарсы іс-қимыл",
+        "aliases": [
+          "ПОД"
+        ]
+      },
+      {
+        "abbr": "CTF",
+        "en": "Counter-Terrorism Financing",
+        "ru": "Противодействие финансированию терроризма",
+        "kk": "Терроризмді қаржыландыруға қарсы іс-қимыл",
+        "aliases": [
+          "ПФТ"
+        ]
+      },
+      {
+        "abbr": "KYC",
+        "en": "Know Your Customer",
+        "ru": "Знай своего клиента",
+        "kk": "Клиентті тану",
+        "aliases": []
+      },
+      {
+        "abbr": "IIN",
+        "en": "Individual Identification Number",
+        "ru": "Индивидуальный идентификационный номер",
+        "kk": "Жеке сәйкестендіру нөмірі",
+        "aliases": [
+          "ИИН",
+          "ЖСН"
+        ]
+      },
+      {
+        "abbr": "ИИН",
+        "en": "Individual Identification Number",
+        "ru": "Индивидуальный идентификационный номер",
+        "kk": "Жеке сәйкестендіру нөмірі",
+        "aliases": [
+          "IIN",
+          "ЖСН"
+        ]
+      },
+      {
+        "abbr": "EDS",
+        "en": "Electronic Digital Signature",
+        "ru": "Электронная цифровая подпись",
+        "kk": "Электрондық цифрлық қолтаңба",
+        "aliases": [
+          "ЭЦП",
+          "ЭЦҚ"
+        ]
+      },
+      {
+        "abbr": "JSC",
+        "en": "Joint Stock Company",
+        "ru": "Акционерное общество",
+        "kk": "Акционерлік қоғам",
+        "aliases": [
+          "АО",
+          "АҚ"
+        ]
+      },
+      {
+        "abbr": "TRP",
+        "en": "Temporary Residence Permit",
+        "ru": "Разрешение на временное проживание",
+        "kk": "Уақытша тұруға рұқсат",
+        "aliases": [
+          "РВП"
+        ]
+      },
+      {
+        "abbr": "PE",
+        "en": "Private Equity",
+        "ru": "Прямые инвестиции / Частный капитал",
+        "kk": "Жеке меншік капитал",
+        "aliases": []
+      },
+      {
+        "abbr": "VAT",
+        "en": "Value Added Tax",
+        "ru": "Налог на добавленную стоимость",
+        "kk": "Қосылған құн салығы",
+        "aliases": [
+          "НДС",
+          "ҚҚС"
+        ]
+      },
+      {
+        "abbr": "CFC",
+        "en": "Controlled Foreign Companies",
+        "ru": "Контролируемые иностранные компании",
+        "kk": "Бақыланатын шетелдік компания",
+        "aliases": [
+          "КИК"
+        ]
+      },
+      {
+        "abbr": "MCI",
+        "en": "Monthly Calculation Index",
+        "ru": "Месячный расчётный показатель",
+        "kk": "Айлық есептік көрсеткіш",
+        "aliases": [
+          "МРП",
+          "АЕК"
+        ]
+      }
+    ],
+    "carbon_climate": [
+      {
+        "abbr": "GFC",
+        "en": "AIFC Green Finance Centre",
+        "ru": "Центр зеленых финансов МФЦА",
+        "kk": "АХҚО Жасыл қаржы орталығы",
+        "aliases": [
+          "ЦЗФ",
+          "ЖҚО"
+        ]
+      },
+      {
+        "abbr": "VCM",
+        "en": "Voluntary Carbon Market",
+        "ru": "Добровольный углеродный рынок",
+        "kk": "Ерікті көміртегі нарығы",
+        "aliases": []
+      },
+      {
+        "abbr": "ETS",
+        "en": "Emissions Trading System",
+        "ru": "Система торговли выбросами",
+        "kk": "Шығарындылармен сауда жүйесі",
+        "aliases": [
+          "СТВ",
+          "ШСЖ"
+        ]
+      },
+      {
+        "abbr": "СТВ",
+        "en": "Emissions Trading System",
+        "ru": "Система торговли выбросами",
+        "kk": "Шығарындылармен сауда жүйесі",
+        "aliases": [
+          "ETS",
+          "ШСЖ"
+        ]
+      },
+      {
+        "abbr": "GHG",
+        "en": "Greenhouse Gas",
+        "ru": "Парниковый газ",
+        "kk": "Жылыжай газы",
+        "aliases": [
+          "GHGs",
+          "ПГ"
+        ]
+      },
+      {
+        "abbr": "ПГ",
+        "en": "Greenhouse Gas",
+        "ru": "Парниковые газы",
+        "kk": "Жылыжай газдары",
+        "aliases": [
+          "GHG",
+          "GHGs"
+        ]
+      },
+      {
+        "abbr": "CO2",
+        "en": "Carbon Dioxide",
+        "ru": "Диоксид углерода / Углекислый газ",
+        "kk": "Көмірқышқыл газы",
+        "aliases": [
+          "CO₂"
+        ]
+      },
+      {
+        "abbr": "VCS",
+        "en": "Verified Carbon Standard",
+        "ru": "Верифицированный углеродный стандарт",
+        "kk": "Расталған көміртегі стандарты",
+        "aliases": []
+      },
+      {
+        "abbr": "REC",
+        "en": "Renewable Energy Certificate / International Renewable Energy Certificate",
+        "ru": "Сертификат возобновляемой энергии",
+        "kk": "Жаңартылатын энергия сертификаты",
+        "aliases": [
+          "I-REC",
+          "I-RECs",
+          "RECs",
+          "СВЭ"
+        ]
+      },
+      {
+        "abbr": "СВЭ",
+        "en": "Renewable Energy Certificate / International Renewable Energy Certificate",
+        "ru": "Сертификат возобновляемой энергии",
+        "kk": "Жаңартылатын энергия сертификаты",
+        "aliases": [
+          "REC",
+          "I-REC",
+          "I-RECs",
+          "RECs"
+        ]
+      },
+      {
+        "abbr": "ICAP",
+        "en": "International Carbon Action Partnership",
+        "ru": "Международное партнёрство по углеродным действиям",
+        "kk": "Халықаралық көміртегі іс-шаралар серіктестігі",
+        "aliases": []
+      },
+      {
+        "abbr": "ICVCM",
+        "en": "Integrity Council for the Voluntary Carbon Market",
+        "ru": "Совет честности добровольного углеродного рынка",
+        "kk": "Ерікті көміртегі нарығының тұтастық кеңесі",
+        "aliases": []
+      },
+      {
+        "abbr": "VCMI",
+        "en": "Voluntary Carbon Markets Integrity Initiative",
+        "ru": "Инициатива честности добровольных углеродных рынков",
+        "kk": "Ерікті көміртегі нарықтары тұтастық бастамасы",
+        "aliases": []
+      },
+      {
+        "abbr": "CCP",
+        "en": "Core Carbon Principles",
+        "ru": "Основные углеродные принципы",
+        "kk": "Негізгі көміртегі қағидаттары",
+        "aliases": []
+      },
+      {
+        "abbr": "CCB",
+        "en": "Climate, Community and Biodiversity Standards",
+        "ru": "Стандарты климата, сообщества и биоразнообразия",
+        "kk": "Климат, қоғамдастық және биоалуантүрлілік стандарттары",
+        "aliases": []
+      },
+      {
+        "abbr": "REDD",
+        "en": "Reducing Emissions from Deforestation and forest Degradation",
+        "ru": "Сокращение выбросов от обезлесения и деградации лесов",
+        "kk": "Ормансыздану мен деградациядан туындаған шығарындыларды азайту",
+        "aliases": []
+      },
+      {
+        "abbr": "CORSIA",
+        "en": "Carbon Offsetting and Reduction Scheme for International Aviation",
+        "ru": "Схема компенсации и сокращения выбросов для международной авиации",
+        "kk": "Халықаралық авиациядағы көміртегі өтеу схемасы",
+        "aliases": []
+      },
+      {
+        "abbr": "ICAO",
+        "en": "International Civil Aviation Organization",
+        "ru": "Международная организация гражданской авиации",
+        "kk": "Халықаралық азаматтық авиация ұйымы",
+        "aliases": [
+          "ИКАО"
+        ]
+      },
+      {
+        "abbr": "ESG",
+        "en": "Environmental, Social, and Governance",
+        "ru": "Экологические, социальные и управленческие критерии",
+        "kk": "Экологиялық, әлеуметтік және басқарушылық критерийлер",
+        "aliases": []
+      },
+      {
+        "abbr": "ICROA",
+        "en": "International Carbon Reduction and Offset Alliance",
+        "ru": "Международный альянс по сокращению и компенсации выбросов углерода",
+        "kk": "Халықаралық көміртегін азайту және өтеу альянсы",
+        "aliases": []
+      },
+      {
+        "abbr": "IFM",
+        "en": "Improved Forest Management",
+        "ru": "Улучшенное лесоуправление",
+        "kk": "Жетілдірілген орман шаруашылығы",
+        "aliases": []
+      },
+      {
+        "abbr": "NFE",
+        "en": "Non-Financial Entity",
+        "ru": "Нефинансовая организация",
+        "kk": "Қаржылық емес ұйым",
+        "aliases": []
+      },
+      {
+        "abbr": "MW",
+        "en": "Megawatt",
+        "ru": "Мегаватт",
+        "kk": "Мегаватт",
+        "aliases": []
+      }
+    ],
+    "capital_markets": [
+      {
+        "abbr": "EUA",
+        "en": "EU Allowances",
+        "ru": "Квоты EU ETS",
+        "kk": "EU ETS квоталары",
+        "aliases": []
+      },
+      {
+        "abbr": "FEAS",
+        "en": "Federation of Euro-Asian Stock Exchanges",
+        "ru": "Федерация евроазиатских фондовых бирж",
+        "kk": "Еуразиялық қор биржалары федерациясы",
+        "aliases": []
+      },
+      {
+        "abbr": "CIBAFI",
+        "en": "General Council for Islamic Banks and Financial Institutions",
+        "ru": "Генеральный совет исламских банков и финансовых институтов",
+        "kk": "Ислам банктері мен қаржы институттарының бас кеңесі",
+        "aliases": []
+      }
+    ],
+    "currency_energy": [
+      {
+        "abbr": "KZT",
+        "en": "Kazakhstani Tenge",
+        "ru": "Казахстанский тенге",
+        "kk": "Қазақстандық теңге",
+        "aliases": []
+      },
+      {
+        "abbr": "USD",
+        "en": "US Dollar",
+        "ru": "Доллар США",
+        "kk": "АҚШ доллары",
+        "aliases": []
+      },
+      {
+        "abbr": "ВИЭ",
+        "en": "Renewable Energy Sources",
+        "ru": "Возобновляемые источники энергии",
+        "kk": "Жаңартылатын энергия көздері",
+        "aliases": [
+          "RES",
+          "ЖЭК"
+        ]
+      }
+    ],
+    "roles": [
+      {
+        "abbr": "CEO",
+        "en": "Chief Executive Officer",
+        "ru": "Генеральный директор",
+        "kk": "Бас директор",
+        "aliases": []
+      }
+    ]
+  },
+  "excluded": [
+    "TAF",
+    "GLP",
+    "UAE",
+    "EU",
+    "ЕС",
+    "UK",
+    "USA",
+    "США",
+    "RK",
+    "ҚР",
+    "UN",
+    "ООН",
+    "КЗТ",
+    "MSCI",
+    "ICE",
+    "HR",
+    "SDU",
+    "ВВП",
+    "GDP"
+  ],
+  "context": {
+    "general": [
+      {
+        "key": "domain",
+        "value": "Astana International Financial Centre (AIFC, МФЦА, АХҚО)"
+      },
+      {
+        "key": "scope",
+        "value": "AIFC Authority, AFSA, AIX, AIFC Expat Centre, IAC, AIFC Green Finance Centre, Carbon Platform, FinTech Lab"
+      }
+    ],
+    "text": "Core AIFC entities:\nAIFC = Astana International Financial Centre | Международный финансовый центр «Астана» | Астана Халықаралық Қаржы Орталығы | aliases: МФЦА, АХҚО\nМФЦА = Astana International Financial Centre | Международный финансовый центр «Астана» | Астана Халықаралық Қаржы Орталығы | aliases: AIFC, АХҚО\nАХҚО = Astana International Financial Centre | Международный финансовый центр «Астана» | Астана Халықаралық Қаржы Орталығы | aliases: AIFC, МФЦА\nAFSA = Astana Financial Services Authority | Комитет МФЦА по регулированию финансовых услуг | АХҚО Қаржылық қызметтер көрсетуді реттеу жөніндегі комитеті | aliases: АФСА\nAIFCA = AIFC Authority | Администрация МФЦА | АХҚО әкімшілігі\nAIX = Astana International Exchange | Астанинская международная биржа | Астана Халықаралық Биржасы\nAEC = AIFC Expat Centre | Экспат центр МФЦА | АХҚО Экспат орталығы\nIAC = AIFC International Arbitration Centre | Международный арбитражный центр МФЦА | АХҚО Халықаралық Арбитраж Орталығы\n\nFinancial and legal terms:\nAML = Anti-Money Laundering | Противодействие отмыванию денег | Ақшаны жылыстатуға қарсы іс-қимыл | aliases: ПОД\nCTF = Counter-Terrorism Financing | Противодействие финансированию терроризма | Терроризмді қаржыландыруға қарсы іс-қимыл | aliases: ПФТ\nKYC = Know Your Customer | Знай своего клиента | Клиентті тану\nIIN = Individual Identification Number | Индивидуальный идентификационный номер | Жеке сәйкестендіру нөмірі | aliases: ИИН, ЖСН\nИИН = Individual Identification Number | Индивидуальный идентификационный номер | Жеке сәйкестендіру нөмірі | aliases: IIN, ЖСН\nEDS = Electronic Digital Signature | Электронная цифровая подпись | Электрондық цифрлық қолтаңба | aliases: ЭЦП, ЭЦҚ\nJSC = Joint Stock Company | Акционерное общество | Акционерлік қоғам | aliases: АО, АҚ\nTRP = Temporary Residence Permit | Разрешение на временное проживание | Уақытша тұруға рұқсат | aliases: РВП\nPE = Private Equity | Прямые инвестиции / Частный капитал | Жеке меншік капитал\nVAT = Value Added Tax | Налог на добавленную стоимость | Қосылған құн салығы | aliases: НДС, ҚҚС\nCFC = Controlled Foreign Companies | Контролируемые иностранные компании | Бақыланатын шетелдік компания | aliases: КИК\nMCI = Monthly Calculation Index | Месячный расчётный показатель | Айлық есептік көрсеткіш | aliases: МРП, АЕК\n\nCarbon markets and climate terms:\nGFC = AIFC Green Finance Centre | Центр зеленых финансов МФЦА | АХҚО Жасыл қаржы орталығы | aliases: ЦЗФ, ЖҚО\nVCM = Voluntary Carbon Market | Добровольный углеродный рынок | Ерікті көміртегі нарығы\nETS = Emissions Trading System | Система торговли выбросами | Шығарындылармен сауда жүйесі | aliases: СТВ, ШСЖ\nСТВ = Emissions Trading System | Система торговли выбросами | Шығарындылармен сауда жүйесі | aliases: ETS, ШСЖ\nGHG = Greenhouse Gas | Парниковый газ | Жылыжай газы | aliases: GHGs, ПГ\nПГ = Greenhouse Gas | Парниковые газы | Жылыжай газдары | aliases: GHG, GHGs\nCO2 = Carbon Dioxide | Диоксид углерода / Углекислый газ | Көмірқышқыл газы | aliases: CO₂\nVCS = Verified Carbon Standard | Верифицированный углеродный стандарт | Расталған көміртегі стандарты\nREC = Renewable Energy Certificate / International Renewable Energy Certificate | Сертификат возобновляемой энергии | Жаңартылатын энергия сертификаты | aliases: I-REC, I-RECs, RECs, СВЭ\nСВЭ = Renewable Energy Certificate / International Renewable Energy Certificate | Сертификат возобновляемой энергии | Жаңартылатын энергия сертификаты | aliases: REC, I-REC, I-RECs, RECs\nICAP = International Carbon Action Partnership | Международное партнёрство по углеродным действиям | Халықаралық көміртегі іс-шаралар серіктестігі\nICVCM = Integrity Council for the Voluntary Carbon Market | Совет честности добровольного углеродного рынка | Ерікті көміртегі нарығының тұтастық кеңесі\nVCMI = Voluntary Carbon Markets Integrity Initiative | Инициатива честности добровольных углеродных рынков | Ерікті көміртегі нарықтары тұтастық бастамасы\nCCP = Core Carbon Principles | Основные углеродные принципы | Негізгі көміртегі қағидаттары\nCCB = Climate, Community and Biodiversity Standards | Стандарты климата, сообщества и биоразнообразия | Климат, қоғамдастық және биоалуантүрлілік стандарттары\nREDD = Reducing Emissions from Deforestation and forest Degradation | Сокращение выбросов от обезлесения и деградации лесов | Ормансыздану мен деградациядан туындаған шығарындыларды азайту\nCORSIA = Carbon Offsetting and Reduction Scheme for International Aviation | Схема компенсации и сокращения выбросов для международной авиации | Халықаралық авиациядағы көміртегі өтеу схемасы\nICAO = International Civil Aviation Organization | Международная организация гражданской авиации | Халықаралық азаматтық авиация ұйымы | aliases: ИКАО\nESG = Environmental, Social, and Governance | Экологические, социальные и управленческие критерии | Экологиялық, әлеуметтік және басқарушылық критерийлер\nICROA = International Carbon Reduction and Offset Alliance | Международный альянс по сокращению и компенсации выбросов углерода | Халықаралық көміртегін азайту және өтеу альянсы\nIFM = Improved Forest Management | Улучшенное лесоуправление | Жетілдірілген орман шаруашылығы\nNFE = Non-Financial Entity | Нефинансовая организация | Қаржылық емес ұйым\nMW = Megawatt | Мегаватт | Мегаватт\n\nCapital markets and exchange terms:\nEUA = EU Allowances | Квоты EU ETS | EU ETS квоталары\nFEAS = Federation of Euro-Asian Stock Exchanges | Федерация евроазиатских фондовых бирж | Еуразиялық қор биржалары федерациясы\nCIBAFI = General Council for Islamic Banks and Financial Institutions | Генеральный совет исламских банков и финансовых институтов | Ислам банктері мен қаржы институттарының бас кеңесі\n\nCurrency and energy terms:\nKZT = Kazakhstani Tenge | Казахстанский тенге | Қазақстандық теңге\nUSD = US Dollar | Доллар США | АҚШ доллары\nВИЭ = Renewable Energy Sources | Возобновляемые источники энергии | Жаңартылатын энергия көздері | aliases: RES, ЖЭК\n\nRole terms:\nCEO = Chief Executive Officer | Генеральный директор | Бас директор",
+    "terms": [
+      "AIFC",
+      "МФЦА",
+      "АХҚО",
+      "AFSA",
+      "AIFCA",
+      "AIX",
+      "AEC",
+      "IAC",
+      "GFC",
+      "AML",
+      "CTF",
+      "KYC",
+      "IIN",
+      "ИИН",
+      "EDS",
+      "JSC",
+      "TRP",
+      "PE",
+      "VAT",
+      "CFC",
+      "MCI",
+      "VCM",
+      "ETS",
+      "СТВ",
+      "GHG",
+      "ПГ",
+      "CO2",
+      "VCS",
+      "REC",
+      "СВЭ",
+      "ICAP",
+      "ICVCM",
+      "VCMI",
+      "CCP",
+      "CCB",
+      "REDD",
+      "CORSIA",
+      "ICAO",
+      "ESG",
+      "ICROA",
+      "IFM",
+      "NFE",
+      "MW",
+      "KZT",
+      "USD",
+      "ВИЭ",
+      "EUA",
+      "FEAS",
+      "CIBAFI",
+      "CEO",
+      "АФСА",
+      "ЦЗФ",
+      "ЖҚО",
+      "ПОД",
+      "ПФТ",
+      "ЖСН",
+      "ЭЦП",
+      "ЭЦҚ",
+      "АО",
+      "АҚ",
+      "РВП",
+      "НДС",
+      "ҚҚС",
+      "КИК",
+      "МРП",
+      "АЕК",
+      "ШСЖ",
+      "GHGs",
+      "CO₂",
+      "I-REC",
+      "I-RECs",
+      "RECs",
+      "ИКАО",
+      "RES",
+      "ЖЭК",
+      "FinTech Lab",
+      "Expat Centre",
+      "AIFC Portal",
+      "Public Register",
+      "Carbon Platform",
+      "Astana International Financial Centre",
+      "Международный финансовый центр «Астана»",
+      "Астана Халықаралық Қаржы Орталығы",
+      "Astana Financial Services Authority",
+      "Комитет МФЦА по регулированию финансовых услуг",
+      "АХҚО Қаржылық қызметтер көрсетуді реттеу жөніндегі комитеті",
+      "AIFC Authority",
+      "Администрация МФЦА",
+      "АХҚО әкімшілігі",
+      "Astana International Exchange",
+      "Астанинская международная биржа",
+      "Астана Халықаралық Биржасы",
+      "AIFC Expat Centre",
+      "Экспат центр МФЦА",
+      "АХҚО Экспат орталығы",
+      "International Arbitration Centre",
+      "AIFC Green Finance Centre",
+      "Центр зеленых финансов МФЦА",
+      "АХҚО Жасыл қаржы орталығы",
+      "Anti-Money Laundering",
+      "Counter-Terrorism Financing",
+      "Know Your Customer",
+      "Individual Identification Number",
+      "Electronic Digital Signature",
+      "Temporary Residence Permit",
+      "Value Added Tax",
+      "Controlled Foreign Companies",
+      "Monthly Calculation Index",
+      "Voluntary Carbon Market",
+      "Добровольный углеродный рынок",
+      "Ерікті көміртегі нарығы",
+      "Emissions Trading System",
+      "Система торговли выбросами",
+      "Шығарындылармен сауда жүйесі",
+      "Renewable Energy Certificate",
+      "International Renewable Energy Certificate",
+      "Core Carbon Principles",
+      "Environmental, Social, and Governance",
+      "Federation of Euro-Asian Stock Exchanges",
+      "General Council for Islamic Banks and Financial Institutions"
+    ]
+  }
+}
