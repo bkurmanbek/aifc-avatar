@@ -210,8 +210,9 @@ _PARTIAL_INTERRUPT_WINDOW_S = 1.2
 _PARTIAL_INTERRUPT_HITS = 2
 _INTERRUPT_COOLDOWN_S = 1.0
 _DUPLICATE_FINAL_AUDIO_IGNORE_S = 6.0
-_MAX_SPOKEN_WORDS = 70
-_MAX_SPOKEN_CHARS = 420
+_MAX_SPOKEN_WORDS = 28
+_MAX_SPOKEN_CHARS = 180
+_MAX_REALTIME_TTS_CHUNKS = 6
 _SPOKEN_SOFT_CUT_RE = re.compile(r"[,;:，；、]")
 _STREAM_WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі0-9]+(?:['’\-][A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі0-9]+)?", re.UNICODE)
 _TTS_MAX_WORD_COUNT = 7
@@ -620,6 +621,15 @@ def _build_tts_chunks(text: str, language: str | None = None) -> list[str]:
     return [chunk for chunk in chunks if chunk]
 
 
+def _cap_tts_chunks_for_latency(chunks: object, spoken: str, language: str) -> list[str]:
+    raw_chunks = _normalize_tts_chunks(chunks)
+    combined = " ".join(raw_chunks).strip() or str(spoken or "").strip()
+    capped = _trim_spoken_for_latency(combined, language)
+    if not capped:
+        return []
+    return _build_tts_chunks(capped, language)[:_MAX_REALTIME_TTS_CHUNKS]
+
+
 def _enforce_prompt_details(payload_details: object, follow_up_count: int) -> dict:
     if not isinstance(payload_details, dict):
         payload_details = {}
@@ -760,7 +770,7 @@ async def _normalize_spoken_for_tts(raw_spoken: str, language: str) -> str:
     spoken = prepare_tts_text(raw_spoken, language, SONIOX_TTS_CONTEXT_FILE)
     if not spoken:
         spoken = remove_repeated_sentences(sanitize_spoken_text(raw_spoken))
-    return spoken
+    return _trim_spoken_for_latency(spoken, language)
 
 
 async def _postprocess_spoken_block(spoken_text: str, language: str) -> str:
@@ -1414,6 +1424,8 @@ class ClientSession:
         tagged_answer = ""
         spoken_emitted = False
         streamed_spoken_chars = 0
+        streamed_spoken_for_voice = ""
+        spoken_stream_capped = False
         race_result: AnswerRaceResult | None = None
         plan = SimpleNamespace(answer_language=language)
         chunks: list[dict] = []
@@ -1455,22 +1467,40 @@ class ClientSession:
             await ensure_response_stream(plan_update, chunks_update)
 
         async def on_gemini_spoken_delta(delta: str, emitted_chars: int, complete: bool) -> None:
-            nonlocal spoken_emitted, streamed_spoken_chars, gemini_spoken_open
+            nonlocal spoken_emitted, streamed_spoken_chars, streamed_spoken_for_voice, spoken_stream_capped, gemini_spoken_open
             if emitted_chars <= streamed_spoken_chars:
+                return
+            streamed_spoken_chars = emitted_chars
+            if spoken_stream_capped:
                 return
             active_stream = await ensure_response_stream()
             spoken = _normalize_tts_chunk_for_language(delta, language)
-            streamed_spoken_chars = emitted_chars
             if not spoken:
+                return
+            candidate = f"{streamed_spoken_for_voice} {spoken}".strip() if streamed_spoken_for_voice else spoken
+            capped = _trim_spoken_for_latency(candidate, language)
+            if len(capped) < len(candidate):
+                spoken_stream_capped = True
+            if streamed_spoken_for_voice and capped.startswith(streamed_spoken_for_voice):
+                spoken = capped[len(streamed_spoken_for_voice):].lstrip()
+            else:
+                spoken = capped
+            if not spoken:
+                if spoken_stream_capped and gemini_spoken_open:
+                    await active_stream.feed("[[/spoken]]")
+                    await active_stream.flush()
+                    gemini_spoken_open = False
                 return
             if metrics.spoken_ready_at is None:
                 metrics.spoken_ready_at = perf_counter()
             spoken_emitted = True
             prefix = "" if gemini_spoken_open else "[[spoken]]"
-            suffix = "[[/spoken]]" if complete else ""
-            gemini_spoken_open = not complete
+            complete_for_voice = complete or spoken_stream_capped
+            suffix = "[[/spoken]]" if complete_for_voice else ""
+            gemini_spoken_open = not complete_for_voice
+            streamed_spoken_for_voice = capped
             await active_stream.feed(f"{prefix}{spoken}{suffix}")
-            if complete:
+            if complete_for_voice:
                 await active_stream.flush()
 
         try:
@@ -1515,7 +1545,9 @@ class ClientSession:
                 contract_payload, _, contract_followups = _coerce_prompt_contract_payload(json_payload, interrupted_input, language)
                 contract_spoken = contract_payload.get("spoken")
                 raw_spoken = str(json_payload.get("spoken", ""))
-                if spoken_emitted and raw_spoken and len(raw_spoken) > streamed_spoken_chars:
+                if spoken_stream_capped and raw_spoken:
+                    streamed_spoken_chars = len(raw_spoken)
+                elif spoken_emitted and raw_spoken and len(raw_spoken) > streamed_spoken_chars:
                     remainder = raw_spoken[streamed_spoken_chars:]
                     spoken = _normalize_tts_chunk_for_language(remainder, language)
                     if spoken:
@@ -1546,15 +1578,15 @@ class ClientSession:
             if not spoken_emitted:
                 tagged_answer = await _postprocess_tagged_answer(tagged_answer, language)
                 if contract_payload and (contract_payload.get("spoken") or contract_payload.get("tts_chunks")):
-                    if contract_spoken is None:
-                        contract_spoken = await _normalize_spoken_for_tts(str(contract_payload.get("spoken", "")), language)
-                    voice_chunks = [
-                        chunk
-                        for chunk in _normalize_tts_chunks(contract_payload.get("tts_chunks"))
-                        if chunk
-                    ]
-                    if not voice_chunks and contract_spoken:
-                        voice_chunks = [contract_spoken]
+                    contract_spoken = await _normalize_spoken_for_tts(
+                        str(contract_spoken if contract_spoken is not None else contract_payload.get("spoken", "")),
+                        language,
+                    )
+                    voice_chunks = _cap_tts_chunks_for_latency(
+                        contract_payload.get("tts_chunks"),
+                        contract_spoken,
+                        language,
+                    )
                     if voice_chunks:
                         _, answer_details, answer_followups = extract_blocks(_normalize_tagged_answer(tagged_answer))
                         tagged_answer = rebuild_blocks("", answer_details, answer_followups)
@@ -1581,8 +1613,10 @@ class ClientSession:
                 payload["tts_chunks"] = _normalize_tts_chunks(contract_payload.get("tts_chunks"))
                 payload["follow_up_questions"] = _normalize_followup_questions(contract_payload.get("follow_up_questions"))
                 if contract_payload.get("spoken"):
-                    if contract_spoken is None:
-                        contract_spoken = await _normalize_spoken_for_tts(str(contract_payload.get("spoken", "")), language)
+                    contract_spoken = await _normalize_spoken_for_tts(
+                        str(contract_spoken if contract_spoken is not None else contract_payload.get("spoken", "")),
+                        language,
+                    )
                     payload["spoken"] = contract_spoken
                 payload["answer_contract"] = contract_payload.get("answer_contract", {})
                 contract_details = contract_payload.get("details", {})
@@ -1614,14 +1648,18 @@ class ClientSession:
             details_payload = payload.get("details")
             payload["details"] = _enforce_prompt_details(details_payload, len(payload.get("follow_up_questions", [])))
             payload["spoken"] = await _normalize_spoken_for_tts(str(payload.get("spoken", "")), language)
-            payload["tts_chunks"] = [
-                chunk
-                for chunk in (
-                    _normalize_tts_chunk_for_language(str(item), language)
-                    for item in _normalize_tts_chunks(payload.get("tts_chunks"))
-                )
-                if chunk
-            ]
+            payload["tts_chunks"] = _cap_tts_chunks_for_latency(
+                [
+                    chunk
+                    for chunk in (
+                        _normalize_tts_chunk_for_language(str(item), language)
+                        for item in _normalize_tts_chunks(payload.get("tts_chunks"))
+                    )
+                    if chunk
+                ],
+                str(payload.get("spoken", "")),
+                language,
+            )
             if not payload["tts_chunks"]:
                 payload["tts_chunks"] = _build_tts_chunks(payload.get("spoken", ""), language)
             if race_result is not None:
