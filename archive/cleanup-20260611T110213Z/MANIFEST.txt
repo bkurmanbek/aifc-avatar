@@ -1,0 +1,21 @@
+Cleanup archive created 20260611T110213Z
+
+Moved generated/runtime artifacts out of the active tree:
+- frontend build/cache/deploy folders
+- root rec_*.wav captures
+- var runtime pid/log state
+- logs/*.log snapshots
+- Python __pycache__ folders
+
+Moved old comparison/prebuild code out of scripts/:
+- run_avatar_comparison.sh
+- stop_avatar_comparison.sh
+- keep_warm_avatar_comparison.sh
+- prebuild_intro_comparison.sh
+- prebuild_intro_cache.py
+- frontend/public/idle-2.mp4
+
+Moved empty frontend placeholder folders:
+- frontend/src/pages
+- frontend/src/stores
+- frontend/src/websocket

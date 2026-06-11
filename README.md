@@ -1,20 +1,54 @@
 # Avatar System Demo
 
-This workspace is the flattened legacy/prototype avatar stack. The former
-`realtime-avatar/` contents now live directly at this root.
+This workspace contains the compact realtime conversational avatar stack.
+
+Primary flow:
+
+```text
+User speech -> STT -> frontend transcript -> LLM streaming -> sentence TTS -> SyncTalk avatar stream
+```
 
 ## Layout
 
 | Path | Role |
 |---|---|
-| `ws_backend/` | WebSocket backend prototype |
+| `backend/` | Canonical backend package and live realtime pipeline |
+| `ws_backend/` | Thin compatibility shim for old entrypoints |
 | `frontend/` | Local Vite frontend copy matching the production UI |
 | `rag/` | Local RAG helpers for this prototype |
-| `scripts/` | Smoke tests and local run helpers |
+| `scripts/` | Single-stack launcher, stop script, and smoke tests |
+| `logs/` | Reset-on-restart module logs |
+| `archive/` | Old generated/runtime/scratch artifacts moved out of the root |
+| `docs/` | Architecture, logging, and protocol notes |
 | `../data/` | Shared corpus, chunks, caches, vector DB, and voice refs |
 | `.env` | Local prototype environment |
 
 ## Commands
+
+Single-avatar realtime stack (SyncTalk + backend + frontend):
+
+```bash
+cd /home/admin-aifc/avatar-system-2
+bash scripts/run_single_avatar.sh
+```
+
+The demo uses:
+
+- SyncTalk avatar: `aifc-avatar-5-exp-5-v3`
+- TTS provider: Soniox realtime TTS (`TTS_PROVIDER=soniox`, voice `SONIOX_TTS_VOICE`)
+- SyncTalk port: `8005`
+- Backend port: `8080`
+- Frontend port: `5173`
+- Idle video: `./frontend/public/idle.mp4`
+
+Stop the stack:
+
+```bash
+cd /home/admin-aifc/avatar-system-2
+bash scripts/stop_single_avatar.sh
+```
+
+Backend only:
 
 ```bash
 cd /home/admin-aifc/avatar-system-2
@@ -24,8 +58,9 @@ bash scripts/run_ws_backend.sh
 `scripts/run_ws_backend.sh` uses
 `/home/admin-aifc/miniforge3/envs/synctalk2d/bin/python` by default. Override
 with `WS_BACKEND_PYTHON=/path/to/python` if a dedicated `.venv` is recreated.
+The canonical backend app is `backend.app.main:app`.
 
-Frontend commands:
+Frontend only:
 
 ```bash
 cd /home/admin-aifc/avatar-system-2/frontend
@@ -33,13 +68,24 @@ npm install
 npm run dev
 ```
 
-Current local state includes `frontend/node_modules` and `frontend/dist` so
-`npm run build` works without reinstalling dependencies first.
+## Smoke Tests
 
-The UI source, public assets, and frontend config were copied from the
-production frontend so the UX matches. Runtime code now uses this local copy;
-local `frontend/.env*`, `frontend/.vercel`, `frontend/node_modules`, and
-`frontend/dist` are kept as demo/deploy/runtime state.
+```bash
+cd /home/admin-aifc/avatar-system-2
+python scripts/smoke_ws_text.py
+python scripts/smoke_ws_interrupt.py
+python scripts/capture_ws_tts.py --text Hello --out rec_1.wav
+```
+
+See also:
+
+- `docs/ARCHITECTURE.md`
+- `docs/WEBSOCKET_PROTOCOL.md`
+- `docs/LOGGING.md`
+
+The UI source, public assets, and frontend config are local to this workspace.
+Generated frontend output, runtime logs, recordings, pid files, and old demo
+experiments are ignored or moved to `archive/`.
 
 ## Canonical Production Stack
 

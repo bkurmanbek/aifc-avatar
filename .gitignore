@@ -1,16 +1,30 @@
 .venv/
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 frontend/.cache/
+frontend/.vercel/
+frontend/node_modules/.vite/
+frontend/node_modules/.vite-temp/
+frontend/node_modules/.tmp/
 
 data/vector_db/
 data/redis/
+cache/
+logs/*.log
+var/
 
 *.log
+rec_*.wav
 .DS_Store
 
 .env
+
+!logs/.gitkeep
+!archive/.gitkeep

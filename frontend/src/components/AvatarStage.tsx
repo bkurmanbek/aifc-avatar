@@ -2,7 +2,8 @@ import { useRef } from 'react'
 import type { RefObject } from 'react'
 import { CANVAS_W, CANVAS_H } from '../constants'
 
-const IDLE_VIDEO_SRC = (import.meta.env.VITE_IDLE_VIDEO_SRC as string | undefined)?.trim() || '/idle.mp4?v=4'
+const IDLE_VIDEO_SRC = (import.meta.env.VITE_IDLE_VIDEO_SRC as string | undefined)?.trim() || '/idle.mp4'
+const AVATAR_LABEL = (import.meta.env.VITE_AVATAR_LABEL as string | undefined)?.trim()
 
 interface AvatarStageProps {
   mode: string
@@ -27,13 +28,9 @@ interface AvatarStageProps {
 export function AvatarStage({
   mode,
   micEnabled,
-  activeListening: _activeListening,
   isListening,
   isBusy,
   showComposer,
-  followUpQuestions: _followUpQuestions,
-  showFollowUps: _showFollowUps,
-  showTranscript: _showTranscript,
   fullscreenTargetRef,
   idleVideoRef,
   speakCanvasRef,
@@ -41,7 +38,6 @@ export function AvatarStage({
   onToggleMute,
   onInterrupt,
   onToggleComposer,
-  onSelectFollowUp: _onSelectFollowUp,
 }: AvatarStageProps) {
   const stageRef = useRef<HTMLDivElement | null>(null)
   const primaryAction = isBusy && !isListening ? onInterrupt : onToggleMic
@@ -59,6 +55,11 @@ export function AvatarStage({
         <div className="stage-presence" aria-hidden="true" />
         <video ref={idleVideoRef} id="idleVid" autoPlay loop muted playsInline src={IDLE_VIDEO_SRC} />
         <canvas ref={speakCanvasRef} id="speakCvs" width={CANVAS_W} height={CANVAS_H} />
+        {AVATAR_LABEL && (
+          <div className="stage-overlay">
+            <span className="stage-avatar-label">{AVATAR_LABEL}</span>
+          </div>
+        )}
         {/* Follow-up suggestions disabled
         {!showComposer && !showTranscript && showFollowUps && followUpQuestions.length > 0 && (
           <div className="stage-followup-strip" aria-label="Suggested follow-up questions">

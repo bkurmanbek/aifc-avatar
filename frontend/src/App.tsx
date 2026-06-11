@@ -10,6 +10,7 @@ import { activeListeningConfig } from './activeListeningConfig'
 import { useWebSocket } from './hooks/useWebSocket'
 import { useChunkPlayback } from './hooks/useChunkPlayback'
 import { useIdleTimer } from './hooks/useIdleTimer'
+import { writeClientLog, type ClientLogLevel } from './services/clientLogger'
 import { AvatarStage } from './components/AvatarStage'
 import { ChatPanel } from './components/ChatPanel'
 import { FloatingChatComposer } from './components/FloatingChatComposer'
@@ -71,7 +72,7 @@ export default function App() {
   const speakCvsRef = useRef<HTMLCanvasElement | null>(null)
   const vadHolderRef = useRef<HTMLDivElement | null>(null)
   const stageStackRef = useRef<HTMLDivElement | null>(null)
-  const sendWsRef = useRef<(payload: unknown) => void>(() => {})
+  const sendWsRef = useRef<(payload: unknown) => boolean>(() => false)
   const stopPlaybackRef = useRef<() => void>(() => {})
   const isBusyRef = useRef(isBusy)
   const isListeningRef = useRef(isListening)
@@ -79,6 +80,11 @@ export default function App() {
   const micEnabledRef = useRef(micEnabled)
   const sttReadyRef = useRef(sttReady)
   const pendingActiveListeningRef = useRef(false)
+  const pendingPromptRef = useRef<string | null>(null)
+  const reconnectPromptRetryRef = useRef<number | null>(null)
+  const isSocketOpenRef = useRef(false)
+  const currentSessionIdRef = useRef<string | null>(null)
+  const activeTurnIdRef = useRef<string | null>(null)
   const stageFollowUpsRef = useRef<string[]>([])
   const showChatRef = useRef(false)
   const idleTimerRef = useRef<{ reset: () => void; clear: () => void }>({ reset: () => {}, clear: () => {} })
@@ -143,10 +149,60 @@ export default function App() {
     return blocks.join('\n\n').trim() || answer.spoken
   }, [])
 
+  const sendTextPayload = useCallback((text: string) => {
+    return sendWsRef.current({ type: 'text', text })
+  }, [])
+
+  const emitClientLog = useCallback((level: ClientLogLevel, source: string, message: string, detail?: unknown) => {
+    writeClientLog({ level, source, message, detail, turn_id: activeTurnIdRef.current })
+    sendWsRef.current({
+      type: 'client_log',
+      level,
+      source,
+      message,
+      detail,
+      turn_id: activeTurnIdRef.current,
+      session_id: currentSessionIdRef.current,
+    })
+  }, [])
+
+  const isStaleTurn = useCallback((turnId?: string) => {
+    return Boolean(turnId && activeTurnIdRef.current !== turnId)
+  }, [])
+
+  const sendTextPrompt = useCallback((text: string) => {
+    setInputText('')
+    const sent = sendTextPayload(text)
+    if (!sent) {
+      pendingPromptRef.current = text
+      isBusyRef.current = false
+      setIsBusy(false)
+      setMode('idle')
+      log('websocket not connected - retrying', 'err')
+    } else {
+      pendingPromptRef.current = null
+      addUserMsg(text)
+      setIsBusy(true)
+      isBusyRef.current = true
+      setMode('thinking')
+    }
+  }, [addUserMsg, log, sendTextPayload])
+
+  const flushPendingPrompt = useCallback(() => {
+    const pendingText = pendingPromptRef.current
+    if (!pendingText || isBusyRef.current) return
+    if (!isSocketOpenRef.current) return
+    pendingPromptRef.current = null
+    sendTextPrompt(pendingText)
+  }, [sendTextPrompt])
+
   // ── WebSocket ──────────────────────────────────────────────────
   const ws = useWebSocket({
     onMessage: (msg: WsInbound) => {
       switch (msg.type) {
+        case 'session_state':
+          currentSessionIdRef.current = msg.session_id
+          break
         case 'partial':
           setPartialText(msg.text)
           break
@@ -175,7 +231,8 @@ export default function App() {
           }
           break
         case 'response_start':
-          playbackRef.current.startStream()
+          activeTurnIdRef.current = msg.turn_id ?? null
+          playbackRef.current.startStream(msg.turn_id)
           beginAssistantMsg()
           showChatRef.current = true
           setShowChat(true)
@@ -183,6 +240,7 @@ export default function App() {
           setMode('thinking')
           break
         case 'response_chunk':
+          if (isStaleTurn(msg.turn_id)) return
           appendAssistantText(msg.text)
           // Debounce setShowChat to avoid flooding React with renders during
           // rapid streaming. First message ensures visibility immediately.
@@ -192,6 +250,7 @@ export default function App() {
           }
           break
         case 'answer_payload':
+          if (isStaleTurn(msg.turn_id)) return
           {
             const nextAnswer = {
             answer_id: msg.answer_id,
@@ -209,31 +268,52 @@ export default function App() {
           setShowChat(true)
           break
         case 'policy_state':
+          if (!activeTurnIdRef.current && msg.turn_id) activeTurnIdRef.current = msg.turn_id
+          if (isStaleTurn(msg.turn_id)) return
           if (msg.answer_language === 'en' || msg.answer_language === 'ru' || msg.answer_language === 'kk' || msg.answer_language === 'zh') {
             dispatchConversation({ type: 'set_answer_language', language: msg.answer_language })
           }
           break
         case 'audio_ready': {
+          if (isStaleTurn(msg.turn_id)) return
           const chunk = msg.chunk ?? 0
-          playbackRef.current.onAudioReady(chunk, msg.data, msg.frame_stride ?? 1, msg.turn_id)
+          playbackRef.current.onAudioReady(chunk, msg.data, msg.frame_stride ?? 1, msg.turn_id, Boolean(msg.cached))
           break
         }
         case 'frame': {
+          if (isStaleTurn(msg.turn_id)) return
           const chunk = msg.chunk ?? 0
           playbackRef.current.onFrame(chunk, msg.data, msg.turn_id)
           break
         }
+        case 'frame_cache': {
+          if (isStaleTurn(msg.turn_id)) return
+          const chunk = msg.chunk ?? 0
+          playbackRef.current.onFrameCache(chunk, msg.url, msg.turn_id)
+          break
+        }
         case 'chunk_done': {
+          if (isStaleTurn(msg.turn_id)) return
           const chunk = msg.chunk ?? 0
           playbackRef.current.onChunkDone(chunk, msg.turn_id)
           break
         }
+        case 'media_error': {
+          if (isStaleTurn(msg.turn_id)) return
+          const chunk = msg.chunk ?? 0
+          playbackRef.current.onChunkError(chunk, msg.turn_id)
+          log(msg.text, 'err')
+          break
+        }
         case 'done':
+          if (isStaleTurn(msg.turn_id)) return
           dispatchConversation({ type: 'done' })
           log(`${msg.chunks ?? 1} chunk(s)`, 'ok')
+          emitClientLog('info', 'pipeline.done', 'turn completed', { turnId: msg.turn_id, latencyMs: msg.latency_ms })
           playbackRef.current.onAllDone(msg.chunks ?? 1)
           break
         case 'status':
+          if (isStaleTurn(msg.turn_id)) return
           log(msg.text)
           if (!playbackRef.current.isPlayingRef.current) {
             const s = msg.text.toLowerCase()
@@ -244,6 +324,7 @@ export default function App() {
           // Backend detected "Stop" / "Стоп" — halt TTS and return to listening.
           // Do NOT send interrupt back — the backend already cancelled everything.
           // Reset VAD state so onSpeechStart will work for the next turn.
+          activeTurnIdRef.current = null
           stopPlaybackRef.current()
           isBusyRef.current = false
           setIsBusy(false)
@@ -252,6 +333,7 @@ export default function App() {
           log('stopped', 'ok')
           break
         case 'interrupted':
+          activeTurnIdRef.current = null
           playbackRef.current.stopPlayback()
           dispatchConversation({ type: 'interrupted' })
           setIsBusy(false)
@@ -259,7 +341,9 @@ export default function App() {
           log('')
           break
         case 'error':
+          if (isStaleTurn(msg.turn_id)) return
           if (isListeningRef.current && !activeListeningRef.current) micRef.current.stopMic()
+          activeTurnIdRef.current = null
           dispatchConversation({ type: 'interrupted' })
           setIsBusy(false)
           playbackRef.current.stopPlayback()
@@ -275,15 +359,64 @@ export default function App() {
       setStatusText('ready')
       setSttReady(false)
       sttReadyRef.current = false
+      isSocketOpenRef.current = true
+      activeTurnIdRef.current = null
       pendingActiveListeningRef.current = false
+      flushPendingPrompt()
       setConnectedAt(Date.now())
       setConnectedSeconds(0)
       log('ready')
-  }, [log]),
+  }, [log, flushPendingPrompt]),
+    onDisconnected: useCallback((disconnectEvent) => {
+      isSocketOpenRef.current = false
+      currentSessionIdRef.current = null
+      activeTurnIdRef.current = null
+      stopPlaybackRef.current()
+      setMode('idle')
+      setStatusText('connecting')
+      setConnectedAt(null)
+      setConnectedSeconds(0)
+      setIsBusy(false)
+      isBusyRef.current = false
+      const reasonBits = [
+        disconnectEvent.code != null ? `code ${disconnectEvent.code}` : null,
+        disconnectEvent.reason ? disconnectEvent.reason : null,
+        disconnectEvent.wasClean != null ? `clean ${disconnectEvent.wasClean}` : null,
+      ].filter(Boolean)
+      const suffix = reasonBits.length > 0 ? ` (${reasonBits.join(', ')})` : ''
+      log(`websocket disconnected${suffix}`, 'err')
+    }, [log]),
+    onError: useCallback((event) => {
+      emitClientLog(event.source === 'websocket.reconnect' ? 'info' : 'warning', event.source, event.message, event.detail)
+      log(event.message, event.source === 'websocket.reconnect' ? undefined : 'err')
+    }, [emitClientLog, log]),
   })
   useEffect(() => {
     sendWsRef.current = ws.sendWs
   }, [ws.sendWs])
+
+  useEffect(() => {
+    const onError = (event: ErrorEvent) => {
+      emitClientLog('error', 'window.onerror', event.message, {
+        filename: event.filename,
+        lineno: event.lineno,
+        colno: event.colno,
+        stack: event.error instanceof Error ? event.error.stack : undefined,
+      })
+    }
+    const onUnhandledRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason
+      emitClientLog('error', 'window.unhandledrejection', reason instanceof Error ? reason.message : String(reason), {
+        stack: reason instanceof Error ? reason.stack : undefined,
+      })
+    }
+    window.addEventListener('error', onError)
+    window.addEventListener('unhandledrejection', onUnhandledRejection)
+    return () => {
+      window.removeEventListener('error', onError)
+      window.removeEventListener('unhandledrejection', onUnhandledRejection)
+    }
+  }, [emitClientLog])
 
   // ── Chunk playback ─────────────────────────────────────────────
   const playback = useChunkPlayback(speakCvsRef, {
@@ -299,7 +432,7 @@ export default function App() {
     }, [log]),
     onFirstFrameRender: useCallback((chunk: number, turnId?: string) => {
       ws.sendWs({ type: 'client_first_render', chunk, turn_id: turnId })
-    }, [ws.sendWs]),
+    }, [ws]),
     onChunkPlaybackStart: useCallback((chunk: number) => {
       dispatchConversation({ type: 'active_spoken_chunk', chunk })
     }, []),
@@ -467,7 +600,6 @@ export default function App() {
       stopRecording(false)
       activeMode = false
       setActiveListening(false)
-      sendWsRef.current({ type: 'close_stt' })
       closeMicResources()
       setMode('idle')
       log('ready', 'ok')
@@ -569,7 +701,15 @@ export default function App() {
         const vad = await MicVAD.new({
           model: activeListeningConfig.model,
           baseAssetPath: '/vendor/vad/',
-          onnxWASMBasePath: '/vendor/onnxruntime/',
+          onnxWASMBasePath: './',
+          ortConfig: (ort) => {
+            ort.env.logLevel = 'error'
+            const ortBaseUrl = new URL('/vendor/onnxruntime/', window.location.origin).href
+            ort.env.wasm.wasmPaths = {
+              mjs: `${ortBaseUrl}ort-wasm-simd-threaded.mjs`,
+              wasm: `${ortBaseUrl}ort-wasm-simd-threaded.wasm`,
+            }
+          },
           positiveSpeechThreshold: activeListeningConfig.positiveSpeechThreshold,
           negativeSpeechThreshold: activeListeningConfig.negativeSpeechThreshold,
           redemptionMs: activeListeningConfig.redemptionMs,
@@ -667,6 +807,7 @@ export default function App() {
     if (isListeningRef.current || activeListeningRef.current) micRef.current.stopMic()
     if (isBusyRef.current) {
       sendWsRef.current({ type: 'interrupt' })
+      activeTurnIdRef.current = null
       stopPlaybackRef.current()
     }
     setMode('idle')
@@ -675,6 +816,13 @@ export default function App() {
     log('')
     idleTimerRef.current.reset()
   }, [log])
+
+  const resetBackendSession = useCallback(() => {
+    sessionReset()
+    activeTurnIdRef.current = null
+    dispatchConversation({ type: 'reset' })
+    sendWsRef.current({ type: 'reset' })
+  }, [sessionReset])
 
   const idleTimer = useIdleTimer(IDLE_TIMEOUT_MS, sessionReset)
 
@@ -707,6 +855,7 @@ export default function App() {
       if (e.code === 'Escape') {
         e.preventDefault()
         sendWsRef.current({ type: 'interrupt' })
+        activeTurnIdRef.current = null
         stopPlaybackRef.current()
         setMode('idle')
         setIsBusy(false)
@@ -746,17 +895,41 @@ export default function App() {
   const submitPrompt = useCallback((text: string) => {
     idleTimerRef.current.reset()
     playback.ensureAudioContext()
-    const socket = ws.wsRef.current
-    if (!text || isBusyRef.current || !socket || socket.readyState !== WebSocket.OPEN) return
-    setInputText('')
-    addUserMsg(text)
-    setIsBusy(true)
-    setMode('thinking')
-    sendWsRef.current({ type: 'text', text })
-  }, [addUserMsg, playback, ws.wsRef])
+    if (!text) return
+    if (isBusyRef.current) {
+      log('wait for the current response to finish', 'err')
+      return
+    }
+    if (!isSocketOpenRef.current) {
+      pendingPromptRef.current = text
+      flushPendingPrompt()
+      log('connecting websocket... retrying automatically')
+      if (reconnectPromptRetryRef.current != null) {
+        window.clearTimeout(reconnectPromptRetryRef.current)
+      }
+      reconnectPromptRetryRef.current = window.setTimeout(() => {
+        flushPendingPrompt()
+        if (pendingPromptRef.current) {
+          log('websocket not connected - refresh the page', 'err')
+        }
+      }, 1200)
+      return
+    }
+    pendingPromptRef.current = null
+    sendTextPrompt(text)
+  }, [log, playback, sendTextPrompt, flushPendingPrompt])
+
+  useEffect(() => {
+    return () => {
+      if (reconnectPromptRetryRef.current != null) {
+        window.clearTimeout(reconnectPromptRetryRef.current)
+      }
+    }
+  }, [])
 
   const interrupt = () => {
     sendWsRef.current({ type: 'interrupt' })
+    activeTurnIdRef.current = null
     stopPlaybackRef.current()
     dispatchConversation({ type: 'interrupted' })
     setIsBusy(false)
@@ -843,7 +1016,7 @@ export default function App() {
                 <span />
               </button>
             </div>
-            <button className="settings-action" type="button" onClick={sessionReset}>Reset session</button>
+            <button className="settings-action" type="button" onClick={resetBackendSession}>Reset session</button>
           </div>
         )}
       </header>

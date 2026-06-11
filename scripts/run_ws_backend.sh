@@ -12,4 +12,4 @@ if [ -f .env ]; then
 fi
 
 PYTHON_BIN="${WS_BACKEND_PYTHON:-/home/admin-aifc/miniforge3/envs/synctalk2d/bin/python}"
-exec "$PYTHON_BIN" -m uvicorn ws_backend.app:app --host 0.0.0.0 --port "${WS_BACKEND_PORT:-8080}"
+exec "$PYTHON_BIN" -m uvicorn backend.app.main:app --host 0.0.0.0 --port "${WS_BACKEND_PORT:-8080}"

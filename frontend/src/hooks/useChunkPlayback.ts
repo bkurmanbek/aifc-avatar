@@ -1,9 +1,14 @@
-/* eslint-disable react-hooks/immutability */
 import { useRef, useCallback, useEffect } from 'react'
 import type { ChunkState } from '../types'
-import { FPS, CANVAS_W, CANVAS_H, CHUNK_GAP_HOLD_MS } from '../constants'
+import { FPS, CANVAS_W, CANVAS_H } from '../constants'
 
 const LIVE_FRAME_HEADROOM_S = 0.14
+const LIVE_READY_FRAME_HEADROOM = 4
+const CACHED_READY_FRAME_HEADROOM = 8
+const PRELOAD_FRAME_WINDOW = 48
+const FRAME_CACHE_INITIAL_LIMIT = 8
+const FRAME_CACHE_NEXT_LIMIT = 24
+const FRAME_CACHE_FETCH_TIMEOUT_MS = 2500
 
 export interface PlaybackCallbacks {
   setMode: (mode: string) => void
@@ -32,6 +37,11 @@ export function useChunkPlayback(
   const chunkGapTimerRef = useRef<number | null>(null)
   const streamActiveRef = useRef(false)
   const firstRenderReportedRef = useRef<Record<string, boolean>>({})
+  const playbackSessionRef = useRef(0)
+  const activeTurnIdRef = useRef<string | null>(null)
+  const frameCacheControllersRef = useRef<Set<AbortController>>(new Set())
+  const maybePlayNextRef = useRef<() => void>(() => {})
+  const playChunkRef = useRef<(idx: number) => void>(() => {})
 
   const chunksRef = useRef<Record<number, ChunkState>>({})
   const nextPlayChunkRef = useRef(0)
@@ -78,21 +88,30 @@ export function useChunkPlayback(
   }, [hideSpeak])
 
   const stopPlayback = useCallback(() => {
+    playbackSessionRef.current += 1
     renderActiveRef.current = false
     isPlayingRef.current = false
     streamActiveRef.current = false
     if (hideSpeakTimerRef.current) window.clearTimeout(hideSpeakTimerRef.current)
     if (chunkGapTimerRef.current) window.clearTimeout(chunkGapTimerRef.current)
     if (currentSrcRef.current) {
+      currentSrcRef.current.onended = null
       try { currentSrcRef.current.stop() } catch { /* ignore */ }
       currentSrcRef.current = null
     }
+    for (const controller of frameCacheControllersRef.current) controller.abort()
+    frameCacheControllersRef.current.clear()
     chunksRef.current = {}
     nextPlayChunkRef.current = 0
     totalChunksRef.current = Infinity
     firstRenderReportedRef.current = {}
+    activeTurnIdRef.current = null
     hideSpeak()
   }, [hideSpeak])
+
+  const isStaleTurn = useCallback((turnId?: string) => {
+    return Boolean(turnId && activeTurnIdRef.current !== turnId)
+  }, [])
 
   const ensureChunk = useCallback((idx: number) => {
     if (!chunksRef.current[idx]) chunksRef.current[idx] = { audio: null, frames: [], frameDone: false, frameStride: 1 }
@@ -100,7 +119,11 @@ export function useChunkPlayback(
 
   const isChunkReadyToPlay = useCallback((_idx: number, ch: ChunkState | undefined) => {
     if (!ch?.audio) return false
-    return true
+    if (ch.error) return false
+    if (ch.cached) return ch.frames.length >= CACHED_READY_FRAME_HEADROOM || (ch.frameDone && ch.frames.length > 0)
+    if (ch.frames.length >= LIVE_READY_FRAME_HEADROOM) return true
+    if (ch.frameDone && ch.frames.length > 0) return true
+    return false
   }, [])
 
   const chunkDone = useCallback((idx: number) => {
@@ -110,7 +133,7 @@ export function useChunkPlayback(
 
     const nextChunk = chunksRef.current[nextPlayChunkRef.current]
     if (isChunkReadyToPlay(nextPlayChunkRef.current, nextChunk)) {
-      maybePlayNext()
+      maybePlayNextRef.current()
       return
     }
 
@@ -123,21 +146,19 @@ export function useChunkPlayback(
 
     cbRef.current.setMode(streamActiveRef.current ? 'rendering' : 'speaking')
     if (chunkGapTimerRef.current) window.clearTimeout(chunkGapTimerRef.current)
-    chunkGapTimerRef.current = window.setTimeout(() => {
-      if (!isPlayingRef.current && streamActiveRef.current) scheduleHideSpeak(180)
-    }, CHUNK_GAP_HOLD_MS)
-  }, [scheduleHideSpeak])
+  }, [isChunkReadyToPlay, scheduleHideSpeak])
 
   const maybePlayNext = useCallback(() => {
     if (isPlayingRef.current) return
     const ch = chunksRef.current[nextPlayChunkRef.current]
     if (isChunkReadyToPlay(nextPlayChunkRef.current, ch)) {
       if (chunkGapTimerRef.current) window.clearTimeout(chunkGapTimerRef.current)
-      void playChunk(nextPlayChunkRef.current)
+      playChunkRef.current(nextPlayChunkRef.current)
     }
   }, [isChunkReadyToPlay])
 
   const playChunk = useCallback(async (idx: number) => {
+    const playbackSession = playbackSessionRef.current
     const ch = chunksRef.current[idx]
     if (!ch?.audio) return
     isPlayingRef.current = true
@@ -168,8 +189,10 @@ export function useChunkPlayback(
       chunkDone(idx)
       return
     }
+    if (playbackSession !== playbackSessionRef.current) return
 
     if (currentSrcRef.current) {
+      currentSrcRef.current.onended = null
       try { currentSrcRef.current.stop() } catch { /* ignore */ }
     }
 
@@ -195,11 +218,21 @@ export function useChunkPlayback(
       return cache[i]
     }
 
-    for (let i = 0; i < Math.min(8, ch.frames.length); i += 1) getImg(i)
+    for (let i = 0; i < Math.min(PRELOAD_FRAME_WINDOW, ch.frames.length); i += 1) getImg(i)
     const firstImg = getImg(0)
     if (firstImg && !firstImg.complete) {
       try { await firstImg.decode() } catch { /* continue; the render loop will retry */ }
     }
+    if (playbackSession !== playbackSessionRef.current) return
+    if (ch.cached) {
+      const preload = []
+      for (let i = 1; i < Math.min(PRELOAD_FRAME_WINDOW, ch.frames.length); i += 1) {
+        const img = getImg(i)
+        if (img && !img.complete) preload.push(img.decode().catch(() => undefined))
+      }
+      await Promise.all(preload)
+    }
+    if (playbackSession !== playbackSessionRef.current) return
 
     const src = acRef.current.createBufferSource()
     src.buffer = buf
@@ -215,7 +248,7 @@ export function useChunkPlayback(
 
     let chunkDoneCalled = false
     const callChunkDone = () => {
-      if (!chunkDoneCalled) {
+      if (!chunkDoneCalled && playbackSession === playbackSessionRef.current) {
         chunkDoneCalled = true
         cbRef.current.onChunkPlaybackEnd?.(idx)
         chunkDone(idx)
@@ -226,6 +259,7 @@ export function useChunkPlayback(
     let last = -1
     let renderStartedAt = 0
     const loop = () => {
+      if (playbackSession !== playbackSessionRef.current) return
       if (!renderActiveRef.current || !acRef.current) return
       const elapsed = Math.max(0, acRef.current.currentTime - t0)
       const frameCount = ch.frames.length
@@ -235,13 +269,15 @@ export function useChunkPlayback(
             1,
             Math.min(
               FPS / Math.max(1, ch.frameStride || 1),
-              frameCount > 1 ? (frameCount - 1) / Math.max(0.001, elapsed + LIVE_FRAME_HEADROOM_S) : 1,
+              frameCount > 1
+                ? (frameCount - 1) / Math.max(0.001, elapsed + (ch.cached ? 0.75 : LIVE_FRAME_HEADROOM_S))
+                : 1,
             ),
           )
       const fi = Math.floor(elapsed * effectiveFps)
       const displayIndex = frameCount > 0 ? Math.min(fi, frameCount - 1) : -1
       if (displayIndex >= 0) {
-        for (let i = displayIndex; i < Math.min(displayIndex + 8, frameCount); i += 1) getImg(i)
+        for (let i = displayIndex; i < Math.min(displayIndex + PRELOAD_FRAME_WINDOW, frameCount); i += 1) getImg(i)
       }
       const img = displayIndex >= 0 ? getImg(displayIndex) : undefined
       if (img?.complete && displayIndex !== last) {
@@ -263,27 +299,107 @@ export function useChunkPlayback(
     requestAnimationFrame(loop)
   }, [speakCvsRef, showSpeak, chunkDone])
 
-  const onAudioReady = useCallback((idx: number, b64: string, frameStride = 1, turnId?: string) => {
+  useEffect(() => {
+    playChunkRef.current = playChunk
+  }, [playChunk])
+
+  useEffect(() => {
+    maybePlayNextRef.current = maybePlayNext
+  }, [maybePlayNext])
+
+  const onAudioReady = useCallback((idx: number, b64: string, frameStride = 1, turnId?: string, cached = false) => {
+    if (isStaleTurn(turnId)) return
     ensureChunk(idx)
     chunksRef.current[idx].audio = b64
     chunksRef.current[idx].frameStride = Math.max(1, frameStride)
+    chunksRef.current[idx].cached = cached
     if (turnId) chunksRef.current[idx].turnId = turnId
     maybePlayNext()
-  }, [ensureChunk, maybePlayNext])
+  }, [ensureChunk, isStaleTurn, maybePlayNext])
 
   const onFrame = useCallback((idx: number, b64: string, turnId?: string) => {
+    if (isStaleTurn(turnId)) return
     ensureChunk(idx)
     if (turnId) chunksRef.current[idx].turnId = turnId
     chunksRef.current[idx].frames.push(b64)
     if (idx === nextPlayChunkRef.current) maybePlayNext()
-  }, [ensureChunk, maybePlayNext])
+  }, [ensureChunk, isStaleTurn, maybePlayNext])
+
+  const onFrameCache = useCallback((idx: number, url: string, turnId?: string) => {
+    if (isStaleTurn(turnId)) return
+    const playbackSession = playbackSessionRef.current
+    ensureChunk(idx)
+    const ch = chunksRef.current[idx]
+    ch.cached = true
+    ch.frameCacheLoading = true
+    if (turnId) ch.turnId = turnId
+    const fetchRange = async (start: number, limit: number) => {
+      const joiner = url.includes('?') ? '&' : '?'
+      const controller = new AbortController()
+      frameCacheControllersRef.current.add(controller)
+      const timer = window.setTimeout(() => controller.abort(), FRAME_CACHE_FETCH_TIMEOUT_MS)
+      try {
+        const response = await fetch(`${url}${joiner}start=${start}&limit=${limit}`, {
+          cache: 'force-cache',
+          signal: controller.signal,
+        })
+        if (!response.ok) throw new Error(`frame cache fetch failed: ${response.status}`)
+        return response.json() as Promise<{ frames?: unknown[]; end?: number; total?: number; has_more?: boolean }>
+      } finally {
+        window.clearTimeout(timer)
+        frameCacheControllersRef.current.delete(controller)
+      }
+    }
+    const load = async () => {
+      try {
+        let payload = await fetchRange(0, FRAME_CACHE_INITIAL_LIMIT)
+        while (true) {
+          if (playbackSession !== playbackSessionRef.current || isStaleTurn(turnId)) return
+          const frames = Array.isArray(payload.frames)
+            ? payload.frames.map((frame) => String(frame)).filter(Boolean)
+            : []
+          if (frames.length) ch.frames.push(...frames)
+          ch.frameCacheLoading = false
+          if (idx === nextPlayChunkRef.current) maybePlayNext()
+          const nextStart = Number(payload.end ?? ch.frames.length)
+          const total = Number(payload.total ?? ch.frames.length)
+          if (!payload.has_more || nextStart >= total) {
+            ch.frameDone = true
+            if (idx === nextPlayChunkRef.current) maybePlayNext()
+            return
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 0))
+          payload = await fetchRange(nextStart, FRAME_CACHE_NEXT_LIMIT)
+        }
+      } catch (error) {
+        if (playbackSession !== playbackSessionRef.current) return
+        ch.error = true
+        ch.frameDone = true
+        ch.frameCacheLoading = false
+        cbRef.current.log(error instanceof Error ? error.message : 'frame cache fetch failed', 'err')
+        if (idx === nextPlayChunkRef.current && !isPlayingRef.current) chunkDone(idx)
+        else if (idx === nextPlayChunkRef.current) maybePlayNext()
+      }
+    }
+    void load()
+  }, [chunkDone, ensureChunk, isStaleTurn, maybePlayNext])
 
   const onChunkDone = useCallback((idx: number, turnId?: string) => {
+    if (isStaleTurn(turnId)) return
     ensureChunk(idx)
     if (turnId) chunksRef.current[idx].turnId = turnId
     chunksRef.current[idx].frameDone = true
     maybePlayNext()
-  }, [ensureChunk, maybePlayNext])
+  }, [ensureChunk, isStaleTurn, maybePlayNext])
+
+  const onChunkError = useCallback((idx: number, turnId?: string) => {
+    if (isStaleTurn(turnId)) return
+    ensureChunk(idx)
+    if (turnId) chunksRef.current[idx].turnId = turnId
+    chunksRef.current[idx].error = true
+    chunksRef.current[idx].frameDone = true
+    if (idx === nextPlayChunkRef.current && !isPlayingRef.current) chunkDone(idx)
+  }, [chunkDone, ensureChunk, isStaleTurn])
 
   const onAllDone = useCallback((n: number) => {
     totalChunksRef.current = n
@@ -294,15 +410,24 @@ export function useChunkPlayback(
     }
   }, [scheduleHideSpeak])
 
-  const startStream = useCallback(() => {
+  const startStream = useCallback((turnId?: string) => {
+    playbackSessionRef.current += 1
     streamActiveRef.current = true
     isPlayingRef.current = false
     renderActiveRef.current = false
+    if (currentSrcRef.current) {
+      currentSrcRef.current.onended = null
+      try { currentSrcRef.current.stop() } catch { /* ignore */ }
+      currentSrcRef.current = null
+    }
+    for (const controller of frameCacheControllersRef.current) controller.abort()
+    frameCacheControllersRef.current.clear()
     if (chunkGapTimerRef.current) window.clearTimeout(chunkGapTimerRef.current)
     chunksRef.current = {}
     nextPlayChunkRef.current = 0
     totalChunksRef.current = Infinity
     firstRenderReportedRef.current = {}
+    activeTurnIdRef.current = turnId ?? null
   }, [])
 
   const setStreamActive = useCallback((active: boolean) => {
@@ -313,8 +438,10 @@ export function useChunkPlayback(
     ensureAudioContext,
     stopPlayback,
     onAudioReady,
+    onFrameCache,
     onFrame,
     onChunkDone,
+    onChunkError,
     onAllDone,
     startStream,
     setStreamActive,
