@@ -17,7 +17,8 @@ from backend.settings import (
     SONIOX_TTS_INTRO_LANGUAGE,
     SONIOX_TTS_INTRO_VOICE,
 )
-from backend.tts import ElevenTTS
+from backend.soniox_tts import SonioxRealtimeTTS
+from backend.synctalk import SyncTalkClient
 
 log = logging.getLogger(__name__)
 
@@ -310,7 +311,7 @@ def save_intro_frames_to_cache(block: IntroBlock, frames: list[str]) -> None:
     payload = {
         "signature": intro_frame_signature(block),
         "key": block.key,
-        "avatar": INTRO_AVATAR_CACHE_KEY,
+        "avatar": safe_cache_key(INTRO_AVATAR_CACHE_KEY),
         "frames": frames,
     }
     tmp_path = path.with_suffix(f"{path.suffix}.tmp")
@@ -318,7 +319,7 @@ def save_intro_frames_to_cache(block: IntroBlock, frames: list[str]) -> None:
     tmp_path.replace(path)
 
 
-async def ensure_intro_audio_file(tts: ElevenTTS, block: IntroBlock) -> bytes:
+async def ensure_intro_audio_file(tts: SonioxRealtimeTTS, block: IntroBlock) -> bytes:
     path = _intro_audio_path(block)
     meta_path = _intro_audio_meta_path(block)
     if _intro_audio_cache_is_valid(block):
@@ -351,24 +352,40 @@ async def ensure_intro_audio_file(tts: ElevenTTS, block: IntroBlock) -> bytes:
         return audio_wav
 
 
-async def prebuild_intro_audio_cache() -> None:
+async def prebuild_intro_cache() -> None:
     if not INTRO_AUDIO_CACHE_PREBUILD:
-        log.info("intro audio cache prebuild skipped")
+        log.info("intro cache prebuild skipped")
         return
     blocks = load_intro_blocks()
     if not blocks:
         return
-    missing = [block for block in blocks if not _intro_audio_cache_is_valid(block)]
-    if not missing:
-        log.info("intro audio cache ready: %s", INTRO_AUDIO_CACHE_DIR)
-        return
-    tts = ElevenTTS()
+
+    tts = SonioxRealtimeTTS()
+    synctalk = SyncTalkClient()
+    generated_audio = 0
+    generated_frames = 0
     try:
-        for block in missing:
-            await ensure_intro_audio_file(tts, block)
-        log.info("intro audio cache generated: %s", INTRO_AUDIO_CACHE_DIR)
+        for index, block in enumerate(blocks):
+            audio_wav = await ensure_intro_audio_file(tts, block)
+            if load_intro_frames_from_cache(block):
+                continue
+            frames: list[str] = []
+            async for frame in synctalk.infer_stream(audio_wav, priority=0 if index == 0 else 1, chunk_idx=index):
+                frames.append(frame)
+            if frames:
+                save_intro_frames_to_cache(block, frames)
+                generated_frames += 1
+            generated_audio += 1
+        log.info(
+            "intro cache ready: dir=%s audio_checked=%d frame_blocks_generated=%d",
+            INTRO_AUDIO_CACHE_DIR,
+            generated_audio,
+            generated_frames,
+        )
     except Exception:
-        log.exception("intro audio cache prebuild failed; missing files will be generated on first session")
+        log.exception("intro cache prebuild failed; missing files will be generated on first session")
     finally:
         with contextlib.suppress(Exception):
             await tts.close()
+        with contextlib.suppress(Exception):
+            await synctalk.close()

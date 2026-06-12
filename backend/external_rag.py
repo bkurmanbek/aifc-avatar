@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass, field
 
@@ -23,6 +25,8 @@ from .settings import (
 log = logging.getLogger(__name__)
 
 _SOURCE_JOIN_LIMIT = 4
+_EXTERNAL_RAG_CLIENT: httpx.AsyncClient | None = None
+_EXTERNAL_RAG_CLIENT_LOCK: asyncio.Lock | None = None
 
 
 @dataclass(frozen=True)
@@ -96,18 +100,49 @@ async def query_external_rag(
     }
     try:
         timeout = httpx.Timeout(config.timeout_s, connect=min(10.0, config.timeout_s))
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(config.url, headers=_headers(config), json=request_payload)
-            response.raise_for_status()
-            try:
-                payload: object = response.json()
-            except ValueError:
-                payload = response.text
+        client = await _external_rag_client()
+        response = await client.post(
+            config.url,
+            headers=_headers(config),
+            json=request_payload,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        try:
+            payload: object = response.json()
+        except ValueError:
+            payload = response.text
     except Exception:
         log.exception("external RAG request failed")
         return ExternalRagResult(error="request_failed")
 
     return normalize_external_rag_payload(payload, config=config)
+
+
+def _client_lock() -> asyncio.Lock:
+    global _EXTERNAL_RAG_CLIENT_LOCK
+    if _EXTERNAL_RAG_CLIENT_LOCK is None:
+        _EXTERNAL_RAG_CLIENT_LOCK = asyncio.Lock()
+    return _EXTERNAL_RAG_CLIENT_LOCK
+
+
+async def _external_rag_client() -> httpx.AsyncClient:
+    global _EXTERNAL_RAG_CLIENT
+    if _EXTERNAL_RAG_CLIENT is not None and not _EXTERNAL_RAG_CLIENT.is_closed:
+        return _EXTERNAL_RAG_CLIENT
+    async with _client_lock():
+        if _EXTERNAL_RAG_CLIENT is None or _EXTERNAL_RAG_CLIENT.is_closed:
+            _EXTERNAL_RAG_CLIENT = httpx.AsyncClient()
+        return _EXTERNAL_RAG_CLIENT
+
+
+async def close_external_rag_client() -> None:
+    global _EXTERNAL_RAG_CLIENT
+    client = _EXTERNAL_RAG_CLIENT
+    _EXTERNAL_RAG_CLIENT = None
+    if client is not None:
+        with contextlib.suppress(Exception):
+            await client.aclose()
 
 
 def normalize_external_rag_payload(
@@ -347,4 +382,4 @@ def _confidence_from_score(score: float, config: ExternalRagConfig) -> str:
 
 
 def _is_prompt_contract(payload: object) -> bool:
-    return isinstance(payload, dict) and any(key in payload for key in ("spoken", "tts_chunks", "follow_up_questions"))
+    return isinstance(payload, dict) and "details" in payload

@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from time import perf_counter
@@ -29,6 +30,7 @@ from .settings import (
     FAQ_WIN_THRESHOLD,
     GEMINI_RAG_MAX_WAIT_MS,
     LOCAL_RAG_HIGH_THRESHOLD,
+    LOCAL_RAG_MAX_CONCURRENCY,
     LOCAL_RAG_PARTIAL_THRESHOLD,
 )
 from .rag_routing import (
@@ -50,16 +52,9 @@ _QUERY_STOPWORDS = {
     "this", "to", "what", "when", "where", "which", "who", "why", "with", "you",
     "your",
 }
-_LOCAL_RAG_BUSY = False
-_LOCAL_RAG_BUSY_LOCK: asyncio.Lock | None = None
-_ANSWER_CACHE_MAX = 128
-_ANSWER_CACHE: list[dict[str, Any]] = []
-_ANSWER_CACHE_LOCK: asyncio.Lock | None = None
-GeminiSpokenCallback = Callable[[str, int, bool], Awaitable[None]]
+_LOCAL_RAG_SEMAPHORE: asyncio.Semaphore | None = None
+_LOCAL_RAG_EXECUTOR: ThreadPoolExecutor | None = None
 GeminiContextCallback = Callable[[object, list[dict]], Awaitable[None]]
-_STREAM_WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі0-9]+(?:['’\-][A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі0-9]+)?", re.UNICODE)
-_TTS_MAX_WORD_COUNT = 7
-_STREAM_TERMINAL_PUNCT = ".!?。！？"
 
 
 @dataclass
@@ -144,10 +139,6 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)
-
-
-def _normalized_query(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", text.casefold())).strip()
 
 
 def _is_aifc_overview_query(query: str) -> bool:
@@ -366,376 +357,51 @@ def _trim_for_first_spoken(text: str) -> str:
     return cleaned
 
 
-def _extract_json_string_field_progress(raw: str, field: str) -> tuple[str, bool] | None:
-    """Return the decoded value of a JSON string field from partial model output."""
-    marker = f'"{field}"'
-    start = raw.find(marker)
-    if start < 0:
-        return None
-
-    colon = raw.find(":", start + len(marker))
-    if colon < 0:
-        return None
-
-    i = colon + 1
-    while i < len(raw) and raw[i].isspace():
-        i += 1
-    if i >= len(raw) or raw[i] != '"':
-        return None
-
-    i += 1
-    value_chars: list[str] = []
-    escaped = False
-    complete = False
-    while i < len(raw):
-        ch = raw[i]
-        i += 1
-        if escaped:
-            value_chars.append("\\" + ch)
-            escaped = False
-            continue
-        if ch == "\\":
-            escaped = True
-            continue
-        if ch == '"':
-            complete = True
-            break
-        value_chars.append(ch)
-
-    value = "".join(value_chars)
-    if complete:
-        try:
-            return json.loads('"' + value + '"'), True
-        except Exception:
-            return value, True
-    return value, False
+def _local_rag_semaphore() -> asyncio.Semaphore:
+    global _LOCAL_RAG_SEMAPHORE
+    if _LOCAL_RAG_SEMAPHORE is None:
+        _LOCAL_RAG_SEMAPHORE = asyncio.Semaphore(max(1, LOCAL_RAG_MAX_CONCURRENCY))
+    return _LOCAL_RAG_SEMAPHORE
 
 
-def _parse_json_string_at(raw: str, start_quote: int) -> tuple[str, int, bool] | None:
-    if start_quote >= len(raw) or raw[start_quote] != '"':
-        return None
-    i = start_quote + 1
-    value_chars: list[str] = []
-    escaped = False
-    while i < len(raw):
-        ch = raw[i]
-        i += 1
-        if escaped:
-            value_chars.append("\\" + ch)
-            escaped = False
-            continue
-        if ch == "\\":
-            escaped = True
-            continue
-        if ch == '"':
-            value = "".join(value_chars)
-            try:
-                return json.loads('"' + value + '"'), i, True
-            except Exception:
-                return value, i, True
-        value_chars.append(ch)
-    return "".join(value_chars), i, False
+def _local_rag_executor() -> ThreadPoolExecutor:
+    global _LOCAL_RAG_EXECUTOR
+    if _LOCAL_RAG_EXECUTOR is None:
+        _LOCAL_RAG_EXECUTOR = ThreadPoolExecutor(
+            max_workers=max(1, LOCAL_RAG_MAX_CONCURRENCY),
+            thread_name_prefix="local-rag",
+        )
+    return _LOCAL_RAG_EXECUTOR
 
 
-def _extract_json_array_string_values_progress(raw: str, field: str, *, start_at: int = 0) -> list[str]:
-    marker = f'"{field}"'
-    start = raw.find(marker, start_at)
-    if start < 0:
-        return []
-    colon = raw.find(":", start + len(marker))
-    if colon < 0:
-        return []
-    i = colon + 1
-    while i < len(raw) and raw[i].isspace():
-        i += 1
-    if i >= len(raw) or raw[i] != "[":
-        return []
-    i += 1
-    values: list[str] = []
-    while i < len(raw):
-        ch = raw[i]
-        if ch == "]":
-            return values
-        if ch == '"':
-            parsed = _parse_json_string_at(raw, i)
-            if parsed is None:
-                return values
-            value, next_i, complete = parsed
-            if complete and value.strip():
-                values.append(value.strip())
-                i = next_i
-                continue
-            return values
-        i += 1
-    return values
-
-
-def _extract_completed_string_fields_after(raw: str, field: str, *, marker: str) -> list[str]:
-    start = raw.find(marker)
-    if start < 0:
-        return []
-    values: list[str] = []
-    search_from = start + len(marker)
-    field_marker = f'"{field}"'
-    while True:
-        pos = raw.find(field_marker, search_from)
-        if pos < 0:
-            return values
-        colon = raw.find(":", pos + len(field_marker))
-        if colon < 0:
-            return values
-        i = colon + 1
-        while i < len(raw) and raw[i].isspace():
-            i += 1
-        if i < len(raw) and raw[i] == '"':
-            parsed = _parse_json_string_at(raw, i)
-            if parsed is None:
-                return values
-            value, next_i, complete = parsed
-            if complete and value.strip():
-                values.append(value.strip())
-                search_from = next_i
-                continue
-            return values
-        search_from = i + 1
-
-
-def _details_voice_prefix_from_partial_json(raw: str) -> str:
-    parts: list[str] = []
-    summary_progress = _extract_json_string_field_progress(raw, "summary")
-    if summary_progress is not None:
-        summary, complete = summary_progress
-        summary_prefix = _streamable_sentence_prefix(summary, complete)
-        if summary_prefix:
-            parts.append(summary_prefix)
-    parts.extend(_extract_json_array_string_values_progress(raw, "points"))
-    sections_start = raw.find('"sections"')
-    if sections_start >= 0:
-        parts.extend(_extract_completed_string_fields_after(raw, "text", marker='"sections"'))
-        search_from = sections_start
-        while True:
-            items = _extract_json_array_string_values_progress(raw, "items", start_at=search_from)
-            if not items:
-                break
-            parts.extend(items)
-            next_pos = raw.find('"items"', search_from + 7)
-            if next_pos < 0 or next_pos <= search_from:
-                break
-            search_from = next_pos
-    out: list[str] = []
-    seen: set[str] = set()
-    for part in parts:
-        cleaned = re.sub(r"\s+", " ", part).strip()
-        key = cleaned.casefold()
-        if cleaned and key not in seen:
-            seen.add(key)
-            out.append(cleaned)
-    return " ".join(out).strip()
-
-
-def _streamable_spoken_prefix(text: str, language: str, complete: bool) -> str:
-    text = (text or "").strip()
-    if not text:
-        return ""
-    if complete:
-        return text
-
-    boundary_chars = ".。"
-    last_boundary = -1
-    for idx, char in enumerate(text):
-        if char in boundary_chars:
-            last_boundary = idx + 1
-            break
-    word_prefix = _word_count_streaming_prefix(text)
-    if last_boundary > 0 and word_prefix:
-        return text[: min(last_boundary, len(word_prefix))].strip()
-    if last_boundary > 0:
-        return text[:last_boundary].strip()
-    return word_prefix
-
-
-def _streamable_sentence_prefix(text: str, complete: bool) -> str:
-    text = (text or "").strip()
-    if not text:
-        return ""
-    if complete:
-        return text
-    last_boundary = -1
-    for idx, char in enumerate(text):
-        if char in _STREAM_TERMINAL_PUNCT:
-            last_boundary = idx + 1
-    if last_boundary > 0:
-        return text[:last_boundary].strip()
-    return ""
-
-
-def _word_count_streaming_prefix(text: str) -> str:
-    words = list(_STREAM_WORD_RE.finditer(text))
-    if len(words) < _TTS_MAX_WORD_COUNT:
-        return ""
-    end = words[_TTS_MAX_WORD_COUNT - 1].end()
-    lookahead = end
-    while lookahead < len(text) and text[lookahead].isspace():
-        lookahead += 1
-    if lookahead < len(text) and text[lookahead] in _STREAM_TERMINAL_PUNCT:
-        end = lookahead + 1
-    return text[:end].strip()
-
-
-def _spoken_delta_from_partial_json(
-    raw: str,
-    language: str,
-    emitted_chars: int,
-) -> tuple[str, int, bool] | None:
-    progress = _extract_json_string_field_progress(raw, "spoken")
-    if progress is None:
-        return None
-    spoken, complete = progress
-    prefix = _streamable_spoken_prefix(spoken, language, complete)
-    if len(prefix) <= emitted_chars:
-        return None
-    delta = prefix[emitted_chars:]
-    if not delta.strip():
-        return None
-    return delta, len(prefix), complete and len(prefix) >= len(spoken.strip())
-
-
-def _voice_delta_from_partial_json(
-    raw: str,
-    language: str,
-    emitted_chars: int,
-) -> tuple[str, int, bool] | None:
-    spoken_delta = _spoken_delta_from_partial_json(raw, language, emitted_chars)
-    if spoken_delta is not None:
-        return spoken_delta
-
-    prefix = _details_voice_prefix_from_partial_json(raw)
-    if not prefix:
-        return None
-    if len(prefix) <= emitted_chars:
-        return None
-    delta = prefix[emitted_chars:]
-    if not delta.strip():
-        return None
-    return delta, len(prefix), False
-
-
-def _local_rag_lock() -> asyncio.Lock:
-    global _LOCAL_RAG_BUSY_LOCK
-    if _LOCAL_RAG_BUSY_LOCK is None:
-        _LOCAL_RAG_BUSY_LOCK = asyncio.Lock()
-    return _LOCAL_RAG_BUSY_LOCK
-
-
-def _answer_cache_lock() -> asyncio.Lock:
-    global _ANSWER_CACHE_LOCK
-    if _ANSWER_CACHE_LOCK is None:
-        _ANSWER_CACHE_LOCK = asyncio.Lock()
-    return _ANSWER_CACHE_LOCK
-
-
-def _release_local_rag_slot(_: object) -> None:
-    global _LOCAL_RAG_BUSY
-    _LOCAL_RAG_BUSY = False
-
-
-async def _run_local_rag_singleflight(
+async def _run_local_rag_limited(
     query: str,
     history: list[dict[str, str]],
     conversation_memory: dict | None,
 ) -> tuple[object, list[dict], dict[str, Any] | None] | None:
-    global _LOCAL_RAG_BUSY
-    async with _local_rag_lock():
-        if _LOCAL_RAG_BUSY:
-            return None
-        _LOCAL_RAG_BUSY = True
-
-    released = False
-
-    def release_slot(_: object | None = None) -> None:
-        nonlocal released
-        global _LOCAL_RAG_BUSY
-        if released:
-            return
-        released = True
-        _LOCAL_RAG_BUSY = False
-
     loop = asyncio.get_running_loop()
-    future = loop.run_in_executor(
-        None,
-        fast_answer_plan_retrieve,
-        query,
-        history,
-        conversation_memory,
-    )
-    future.add_done_callback(release_slot)
-    try:
-        return await asyncio.shield(future)
-    except asyncio.CancelledError:
-        release_slot()
-        raise
-
-
-async def _memory_cache_candidate(query: str, language: str) -> RaceCandidate | None:
-    normalized = _normalized_query(query)
-    query_tokens = _tokens(query)
-    async with _answer_cache_lock():
-        best_entry: dict[str, Any] | None = None
-        best_score = 0.0
-        best_idx = -1
-        for idx, entry in enumerate(_ANSWER_CACHE):
-            if entry.get("language") != language:
-                continue
-            score = 1.0 if entry.get("normalized_query") == normalized else _jaccard(query_tokens, entry.get("tokens", set()))
-            if score > best_score:
-                best_score = score
-                best_entry = entry
-                best_idx = idx
-        if best_entry is None or best_score < CACHE_WIN_THRESHOLD:
-            return None
-        _ANSWER_CACHE.append(_ANSWER_CACHE.pop(best_idx))
-        return RaceCandidate(
-            source="answer_cache",
-            confidence=str(best_entry.get("confidence", "high")),
-            score=_confidence_score(str(best_entry.get("confidence", "high")), best_score),
-            tagged_answer=str(best_entry.get("tagged_answer") or ""),
-            raw_answer=str(best_entry.get("raw_answer") or ""),
-            plan=best_entry.get("plan"),
-            chunks=list(best_entry.get("chunks") or []),
-            citations=list(best_entry.get("citations") or []),
-            cacheable=False,
+    async with _local_rag_semaphore():
+        future = loop.run_in_executor(
+            _local_rag_executor(),
+            fast_answer_plan_retrieve,
+            query,
+            history,
+            conversation_memory,
         )
-
-
-async def _remember_answer(query: str, winner: RaceCandidate) -> None:
-    if not winner.cacheable or winner.fallback or not (winner.tagged_answer or winner.raw_answer):
-        return
-    entry = {
-        "normalized_query": _normalized_query(query),
-        "tokens": _tokens(query),
-        "language": getattr(winner.plan, "answer_language", "en"),
-        "confidence": winner.confidence,
-        "tagged_answer": winner.tagged_answer,
-        "raw_answer": winner.raw_answer,
-        "plan": winner.plan,
-        "chunks": winner.chunks,
-        "citations": winner.citations,
-    }
-    async with _answer_cache_lock():
-        _ANSWER_CACHE.append(entry)
-        while len(_ANSWER_CACHE) > _ANSWER_CACHE_MAX:
-            _ANSWER_CACHE.pop(0)
+        return await asyncio.shield(future)
 
 
 async def clear_answer_caches() -> dict[str, int]:
     semantic_count = await asyncio.to_thread(clear_semantic_answer_cache)
-    async with _answer_cache_lock():
-        answer_count = len(_ANSWER_CACHE)
-        _ANSWER_CACHE.clear()
-    return {
-        "semantic_answer_cache": semantic_count,
-        "answer_cache": answer_count,
-    }
+    return {"cache": semantic_count}
+
+
+def shutdown_answer_race_executor() -> None:
+    global _LOCAL_RAG_EXECUTOR
+    executor = _LOCAL_RAG_EXECUTOR
+    _LOCAL_RAG_EXECUTOR = None
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _candidate_from_answer(
@@ -798,24 +464,6 @@ def _json_details_to_text(value: object) -> str:
     return "\n".join(lines).strip()
 
 
-def _json_followups_to_text(value: object) -> str:
-    if not isinstance(value, list):
-        return ""
-    return "\n".join(f"- {str(item).strip()}" for item in value if str(item).strip())
-
-
-def _tagged_from_raw_json(raw_answer: str) -> str:
-    payload = _extract_json_payload(raw_answer) or _extract_json_from_wrapped(raw_answer)
-    if not isinstance(payload, dict):
-        return ""
-    spoken = str(payload.get("spoken") or "").strip()
-    details = _json_details_to_text(payload.get("details"))
-    followups = _json_followups_to_text(payload.get("follow_up_questions") or payload.get("followups"))
-    if not spoken and not details and not followups:
-        return ""
-    return rebuild_blocks(spoken, details or spoken, followups)
-
-
 def _is_fallback_raw_answer(raw_answer: str) -> bool:
     payload = _extract_json_payload(raw_answer) or _extract_json_from_wrapped(raw_answer)
     if not isinstance(payload, dict):
@@ -824,8 +472,8 @@ def _is_fallback_raw_answer(raw_answer: str) -> bool:
     answer_kind = ""
     if isinstance(details, dict):
         answer_kind = str(details.get("answer_kind") or "").strip().lower()
-    spoken = str(payload.get("spoken") or "").casefold()
-    return answer_kind == "fallback" or "couldn't find a reliable answer" in spoken or "aifc.kz" in spoken
+    details_text = _json_details_to_text(details).casefold()
+    return answer_kind == "fallback" or "couldn't find a reliable answer" in details_text or "aifc.kz" in details_text
 
 
 def _fallback_message(language: str, query: str) -> RaceCandidate:
@@ -847,7 +495,7 @@ def _fallback_message(language: str, query: str) -> RaceCandidate:
         source="fallback",
         confidence="not_found",
         score=0.0,
-        tagged_answer=rebuild_blocks(spoken, details, ""),
+        tagged_answer=rebuild_blocks(spoken, details),
         plan=SimpleNamespace(answer_language=language, route="fallback", is_chitchat=False),
         chunks=[],
         citations=["aifc.kz"],
@@ -875,8 +523,9 @@ def _aifc_overview_candidate(query: str, language: str) -> RaceCandidate | None:
             "FinTech Lab, AIX, Expat Centre, AIFC Court и International Arbitration Centre."
         ),
         "kk": (
-            "АХҚО Қазақстанда және өңірде қаржы қызметтерін, капитал нарықтарын, финтехті, "
-            "жасыл қаржыландыруды және инвестициялық инфрақұрылымды дамытуға қолдау көрсетеді.\n\n"
+            "АХҚО қаржы қызметтері мен капитал нарықтарын дамытуға қолдау көрсетеді, "
+            "сондай-ақ Қазақстанда және өңірде финтехті, жасыл қаржыландыруды және "
+            "инвестициялық инфрақұрылымды дамытады.\n\n"
             "Мен АХҚО бойынша тіркеу, құжаттар, AFSA және реттеу, FinTech Lab, AIX, Expat Centre, "
             "AIFC Court және International Arbitration Centre тақырыптарында көмектесе аламын."
         ),
@@ -898,48 +547,11 @@ def _aifc_overview_candidate(query: str, language: str) -> RaceCandidate | None:
         source="aifc_overview",
         confidence="high",
         score=0.96,
-        tagged_answer=rebuild_blocks(spoken, details, ""),
+        tagged_answer=rebuild_blocks(spoken, details),
         plan=SimpleNamespace(answer_language=language, route="overview", is_chitchat=False),
         citations=["AIFC knowledge base"],
         cacheable=True,
     )
-
-
-def common_tts_prewarm_items() -> list[tuple[str, str]]:
-    items: list[tuple[str, str]] = [
-        ("Hello, welcome. I can help with AIFC services, registration, regulation, courts, arbitration, fintech, and investor topics.", "en"),
-        ("AIFC is the Astana International Financial Centre in Kazakhstan, a financial hub with its own legal and regulatory environment.", "en"),
-        ("AIFC is the Astana International Financial Centre", "en"),
-        ("The Expat Centre offers streamlined access to", "en"),
-        ("To register a company at the AIFC,", "en"),
-        ("Goodbye. I will be here if you have more questions about AIFC.", "en"),
-        ("Sorry, I couldn't find a reliable answer in my knowledge base. Please visit aifc.kz.", "en"),
-        ("Здравствуйте, добро пожаловать. Я могу помочь с вопросами о МФЦА, регистрации, регулировании, суде, арбитраже и финтехе.", "ru"),
-        ("До свидания. Я буду рад помочь, если появятся новые вопросы о МФЦА.", "ru"),
-        ("Извините, я не нашел надежный ответ в своей базе знаний. Пожалуйста, посетите aifc.kz.", "ru"),
-        ("Сәлеметсіз бе, қош келдіңіз. Мен АХҚО қызметтері, тіркеу, реттеу, сот, арбитраж және финтех бойынша көмектесе аламын.", "kk"),
-        ("Сау болыңыз. АХҚО бойынша тағы сұрақтарыңыз болса, көмектесуге дайынмын.", "kk"),
-        ("Кешіріңіз, мен білім базасынан сенімді жауап таба алмадым. aifc.kz сайтына кіріңіз.", "kk"),
-        ("您好，欢迎咨询。我可以帮助解答 AIFC 服务、注册、监管、法院、仲裁和金融科技相关问题。", "zh"),
-        ("再见。如果之后您有 AIFC 相关问题，我可以继续帮助您。", "zh"),
-        ("抱歉，我没有在知识库中找到可靠答案。请访问 aifc.kz。", "zh"),
-    ]
-    deduped: list[tuple[str, str]] = []
-    seen = set()
-    for text, language in items:
-        key = (text, language)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append((text, language))
-    items = deduped
-    seen_texts = {text for text, _ in items}
-    for entry in _HARDCODED_FAQ[:4]:
-        spoken = _trim_for_first_spoken(str(entry.get("answer", "")))
-        if spoken and spoken not in seen_texts:
-            items.append((spoken, "en"))
-            seen_texts.add(spoken)
-    return items
 
 
 async def _faq_candidate(query: str, language: str) -> RaceCandidate | None:
@@ -1103,7 +715,7 @@ async def _local_rag_candidate(
     history: list[dict[str, str]],
     conversation_memory: dict | None,
 ) -> RaceCandidate | None:
-    result = await _run_local_rag_singleflight(query, history, conversation_memory)
+    result = await _run_local_rag_limited(query, history, conversation_memory)
     if result is None:
         return RaceCandidate("local_rag", "not_found", 0.0, chunks=[])
     plan, chunks, fast_hit = result
@@ -1157,7 +769,6 @@ async def _gemini_local_rag_candidate(
     local_task: asyncio.Task[RaceCandidate | None],
     *,
     on_context_ready: GeminiContextCallback | None = None,
-    on_voice_delta: GeminiSpokenCallback | None = None,
 ) -> RaceCandidate | None:
     local = await local_task
     chunks = list(local.chunks)[:5] if local is not None else []
@@ -1177,14 +788,8 @@ async def _gemini_local_rag_candidate(
         needs_widget=bool(getattr(plan, "needs_widget", False)),
     )
     raw = ""
-    emitted_voice_chars = 0
     async for delta in stream_answer(history_msgs, prompt):
         raw += delta or ""
-        if on_voice_delta is not None:
-            voice_delta = _voice_delta_from_partial_json(raw, language, emitted_voice_chars)
-            if voice_delta is not None:
-                text_delta, emitted_voice_chars, complete = voice_delta
-                await on_voice_delta(text_delta, emitted_voice_chars, complete)
     if not raw.strip():
         return None
     is_fallback = _is_fallback_raw_answer(raw)
@@ -1222,9 +827,17 @@ def _cache_winner(query: str, winner: RaceCandidate) -> None:
         return
     if winner.fallback or not (winner.tagged_answer or winner.raw_answer):
         return
-    tagged_answer = winner.tagged_answer or _tagged_from_raw_json(winner.raw_answer)
-    spoken, details, followups = extract_blocks(tagged_answer)
-    answer = sanitize_spoken_text(spoken or tagged_answer, keep_digits=True)
+    tagged_answer = winner.tagged_answer
+    details = ""
+    answer = ""
+    if winner.raw_answer:
+        payload = _extract_json_payload(winner.raw_answer) or _extract_json_from_wrapped(winner.raw_answer)
+        if isinstance(payload, dict):
+            details = _json_details_to_text(payload.get("details"))
+            answer = sanitize_spoken_text(details, keep_digits=True)
+    if not answer and tagged_answer:
+        spoken, details, _ = extract_blocks(tagged_answer)
+        answer = sanitize_spoken_text(spoken or details or tagged_answer, keep_digits=True)
     if not answer:
         return
     plan = winner.plan or SimpleNamespace(answer_language="en", retrieval_queries=[query])
@@ -1247,8 +860,14 @@ def _cache_winner(query: str, winner: RaceCandidate) -> None:
             tagged_answer=tagged_answer,
             raw_answer=winner.raw_answer,
             details=details,
-            followups=followups,
         )
+
+
+def _log_background_task_error(task: asyncio.Task) -> None:
+    with contextlib.suppress(asyncio.CancelledError):
+        exc = task.exception()
+        if exc is not None:
+            log.error("answer race background task failed", exc_info=(type(exc), exc, exc.__traceback__))
 
 
 async def run_answer_race(
@@ -1258,7 +877,6 @@ async def run_answer_race(
     conversation_memory: dict | None,
     *,
     on_gemini_context_ready: GeminiContextCallback | None = None,
-    on_gemini_voice_delta: GeminiSpokenCallback | None = None,
 ) -> AnswerRaceResult:
     started = perf_counter()
     candidates: list[RaceCandidate] = []
@@ -1304,32 +922,6 @@ async def run_answer_race(
         return AnswerRaceResult(winner=winner, timings=timings, candidates=candidates)
 
     created_tasks: set[asyncio.Task[RaceCandidate | None]] = set()
-    gemini_voice_buffer: list[tuple[str, int, bool]] = []
-    gemini_voice_text = ""
-    gemini_voice_committed = False
-
-    async def buffered_gemini_voice_delta(text_delta: str, emitted_chars: int, complete: bool) -> None:
-        nonlocal gemini_voice_text
-        if not text_delta:
-            return
-        gemini_voice_text += text_delta
-        if gemini_voice_committed:
-            if on_gemini_voice_delta is not None:
-                await on_gemini_voice_delta(text_delta, emitted_chars, complete)
-            return
-        gemini_voice_buffer.append((text_delta, emitted_chars, complete))
-
-    async def commit_gemini_voice() -> None:
-        nonlocal gemini_voice_committed
-        if gemini_voice_committed:
-            return
-        gemini_voice_committed = True
-        if on_gemini_voice_delta is None:
-            gemini_voice_buffer.clear()
-            return
-        for text_delta, emitted_chars, complete in gemini_voice_buffer:
-            await on_gemini_voice_delta(text_delta, emitted_chars, complete)
-        gemini_voice_buffer.clear()
 
     def create_candidate_task(name: str, coro) -> asyncio.Task[RaceCandidate | None]:
         task = asyncio.create_task(_timed(name, coro))
@@ -1346,12 +938,10 @@ async def run_answer_race(
             conversation_memory,
             local_task,
             on_context_ready=on_gemini_context_ready,
-            on_voice_delta=buffered_gemini_voice_delta,
         ),
     )
     tasks: set[asyncio.Task[RaceCandidate | None]] = {
         # Public RAG tool: fast public caches/FAQ may win; local RAG retrieves context for Gemini.
-        create_candidate_task("answer_cache", _memory_cache_candidate(query, language)),
         create_candidate_task("faq", _faq_candidate(query, language)),
         create_candidate_task("cache", _cache_candidate(query, language)),
         gemini_task,
@@ -1381,8 +971,6 @@ async def run_answer_race(
                     len(candidate.chunks),
                 )
                 if candidate.tagged_answer or candidate.raw_answer:
-                    if task is gemini_task:
-                        await commit_gemini_voice()
                     winner = candidate
                     break
             if winner is not None:
@@ -1415,7 +1003,6 @@ async def run_answer_race(
                     winner = local_candidate
 
         if winner is None:
-            await commit_gemini_voice()
             try:
                 candidate = await asyncio.wait_for(
                     asyncio.shield(gemini_task),
@@ -1423,17 +1010,6 @@ async def run_answer_race(
                 )
             except asyncio.TimeoutError:
                 candidate = None
-            if candidate is None and gemini_voice_committed and gemini_voice_text.strip():
-                candidate = _candidate_from_answer(
-                    source="gemini_partial",
-                    answer=gemini_voice_text.strip(),
-                    language=language,
-                    confidence="partial",
-                    score=0.5,
-                    plan=SimpleNamespace(answer_language=language, route=GEMINI_PUBLIC_RAG_TOOL, is_chitchat=False),
-                    chunks=[],
-                    cacheable=False,
-                )
             if candidate is not None:
                 if candidate not in candidates:
                     candidates.append(candidate)
@@ -1457,8 +1033,8 @@ async def run_answer_race(
         timings["winner_source"] = winner.source
         timings["winner_confidence"] = winner.confidence
         if winner.cacheable:
-            await _remember_answer(query, winner)
-            asyncio.create_task(asyncio.to_thread(_cache_winner, query, winner))
+            cache_task = asyncio.create_task(asyncio.to_thread(_cache_winner, query, winner))
+            cache_task.add_done_callback(_log_background_task_error)
         return AnswerRaceResult(winner=winner, timings=timings, candidates=candidates)
     finally:
         for task in created_tasks:

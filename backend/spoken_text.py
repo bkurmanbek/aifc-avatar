@@ -5,7 +5,6 @@ import re
 
 _SPOKEN_RE = re.compile(r"\[\[spoken\]\](.*?)\[\[/spoken\]\]", re.IGNORECASE | re.DOTALL)
 _DETAILS_RE = re.compile(r"\[\[details\]\](.*?)\[\[/details\]\]", re.IGNORECASE | re.DOTALL)
-_FOLLOWUPS_RE = re.compile(r"\[\[followups\]\](.*?)\[\[/followups\]\]", re.IGNORECASE | re.DOTALL)
 _CONTROL_TAG_RE = re.compile(r"\[\[/?[a-z_]+\]\]|\[\[[^\]]+\]\]|<[^>]+>")
 _STAGE_DIR_RE = re.compile(r"\[(?:[A-Za-z][^\]]{0,40}|[А-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі][^\]]{0,40}|[\u4e00-\u9fff][^\]]{0,20})\]")
 _PARENS_DIR_RE = re.compile(r"\((?:laughs|giggles|whispers|sighs|pause|sarcastically|smiles?|breathes?)\)", re.IGNORECASE)
@@ -73,15 +72,13 @@ _AIFC_KZ_SPELLED_RE = re.compile(
 def extract_blocks(tagged_text: str) -> tuple[str, str, str]:
     spoken = _match_block(_SPOKEN_RE, tagged_text)
     details = _match_block(_DETAILS_RE, tagged_text)
-    followups = _match_block(_FOLLOWUPS_RE, tagged_text)
-    return spoken, details, followups
+    return spoken, details, ""
 
 
-def rebuild_blocks(spoken: str, details: str, followups: str) -> str:
+def rebuild_blocks(spoken: str, details: str) -> str:
     return (
         f"[[spoken]]{spoken.strip()}[[/spoken]]"
         f"[[details]]{details.strip()}[[/details]]"
-        f"[[followups]]{followups.strip()}[[/followups]]"
     )
 
 
@@ -229,7 +226,12 @@ def _spell_en_number(value: int) -> str:
         if rem:
             return f"{_spell_en_number(thousands)} thousand {_spell_en_number(rem)}"
         return f"{_spell_en_number(thousands)} thousand"
-    return str(value)
+    if value < 1_000_000_000:
+        millions, rem = divmod(value, 1_000_000)
+        if rem:
+            return f"{_spell_en_number(millions)} million {_spell_en_number(rem)}"
+        return f"{_spell_en_number(millions)} million"
+    return " ".join(_EN_ONES[int(ch)] for ch in str(value))
 
 
 def _spell_ru_number(value: int) -> str:
@@ -254,7 +256,13 @@ def _spell_ru_number(value: int) -> str:
         if rem:
             return f"{thousands_text} {thousands_unit} {_spell_ru_number(rem)}"
         return f"{thousands_text} {thousands_unit}"
-    return str(value)
+    if value < 1_000_000_000:
+        millions, rem = divmod(value, 1_000_000)
+        millions_unit = _ru_plural(millions, "миллион", "миллиона", "миллионов")
+        if rem:
+            return f"{_spell_ru_number(millions)} {millions_unit} {_spell_ru_number(rem)}"
+        return f"{_spell_ru_number(millions)} {millions_unit}"
+    return " ".join(_RU_ONES[int(ch)] for ch in str(value))
 
 
 def _spell_ru_number_feminine(value: int) -> str:
@@ -302,7 +310,12 @@ def _spell_kk_number(value: int) -> str:
         if rem:
             return f"{_spell_kk_number(thousands)} мың {_spell_kk_number(rem)}"
         return f"{_spell_kk_number(thousands)} мың"
-    return str(value)
+    if value < 1_000_000_000:
+        millions, rem = divmod(value, 1_000_000)
+        if rem:
+            return f"{_spell_kk_number(millions)} миллион {_spell_kk_number(rem)}"
+        return f"{_spell_kk_number(millions)} миллион"
+    return " ".join(_KK_ONES[int(ch)] for ch in str(value))
 
 
 def _spell_zh_digits(value: str) -> str:

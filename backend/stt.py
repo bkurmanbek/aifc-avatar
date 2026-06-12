@@ -11,7 +11,6 @@ from typing import Any
 
 import websockets
 
-from .abbreviations import normalize_transcript_abbreviations
 from .language import (
     is_noise_utterance,
     normalize_lang,
@@ -23,7 +22,6 @@ from .settings import (
     SONIOX_API_KEY,
     SONIOX_STT_AUDIO_FORMAT,
     SONIOX_STT_BATCH_FINALIZE_TIMEOUT_S,
-    SONIOX_STT_CONTEXT_FILE,
     SONIOX_STT_CONTEXT_MAX_CHARS,
     SONIOX_STT_ENABLE_ENDPOINT_DETECTION,
     SONIOX_STT_LANGUAGE_HINTS,
@@ -38,6 +36,106 @@ from .settings import (
 from .ws_writer import ClientClosedError, WsWriter
 
 log = logging.getLogger(__name__)
+
+SONIOX_STT_CONTEXT: dict[str, Any] = {
+    "general": [
+        {"key": "domain", "value": "Astana International Financial Centre (AIFC, МФЦА, АХҚО)"},
+        {
+            "key": "scope",
+            "value": "AIFC Authority, AFSA, AIX, AIFC Expat Centre, IAC, AIFC Green Finance Centre, Carbon Platform, FinTech Lab",
+        },
+    ],
+    "text": (
+        "Core AIFC entities:\n"
+        "AIFC = Astana International Financial Centre | Международный финансовый центр «Астана» | Астана Халықаралық Қаржы Орталығы | aliases: МФЦА, АХҚО\n"
+        "МФЦА = Astana International Financial Centre | Международный финансовый центр «Астана» | Астана Халықаралық Қаржы Орталығы | aliases: AIFC, АХҚО\n"
+        "АХҚО = Astana International Financial Centre | Международный финансовый центр «Астана» | Астана Халықаралық Қаржы Орталығы | aliases: AIFC, МФЦА\n"
+        "AFSA = Astana Financial Services Authority | Комитет МФЦА по регулированию финансовых услуг | АХҚО Қаржылық қызметтер көрсетуді реттеу жөніндегі комитеті | aliases: АФСА\n"
+        "AIFCA = AIFC Authority | Администрация МФЦА | АХҚО әкімшілігі\n"
+        "AIX = Astana International Exchange | Астанинская международная биржа | Астана Халықаралық Биржасы\n"
+        "AEC = AIFC Expat Centre | Экспат центр МФЦА | АХҚО Экспат орталығы\n"
+        "IAC = AIFC International Arbitration Centre | Международный арбитражный центр МФЦА | АХҚО Халықаралық Арбитраж Орталығы\n"
+        "\n"
+        "Financial and legal terms:\n"
+        "AML = Anti-Money Laundering | Противодействие отмыванию денег | Ақшаны жылыстатуға қарсы іс-қимыл | aliases: ПОД\n"
+        "CTF = Counter-Terrorism Financing | Противодействие финансированию терроризма | Терроризмді қаржыландыруға қарсы іс-қимыл | aliases: ПФТ\n"
+        "KYC = Know Your Customer | Знай своего клиента | Клиентті тану\n"
+        "IIN = Individual Identification Number | Индивидуальный идентификационный номер | Жеке сәйкестендіру нөмірі | aliases: ИИН, ЖСН\n"
+        "ИИН = Individual Identification Number | Индивидуальный идентификационный номер | Жеке сәйкестендіру нөмірі | aliases: IIN, ЖСН\n"
+        "EDS = Electronic Digital Signature | Электронная цифровая подпись | Электрондық цифрлық қолтаңба | aliases: ЭЦП, ЭЦҚ\n"
+        "JSC = Joint Stock Company | Акционерное общество | Акционерлік қоғам | aliases: АО, АҚ\n"
+        "TRP = Temporary Residence Permit | Разрешение на временное проживание | Уақытша тұруға рұқсат | aliases: РВП\n"
+        "PE = Private Equity | Прямые инвестиции / Частный капитал | Жеке меншік капитал\n"
+        "VAT = Value Added Tax | Налог на добавленную стоимость | Қосылған құн салығы | aliases: НДС, ҚҚС\n"
+        "CFC = Controlled Foreign Companies | Контролируемые иностранные компании | Бақыланатын шетелдік компания | aliases: КИК\n"
+        "MCI = Monthly Calculation Index | Месячный расчётный показатель | Айлық есептік көрсеткіш | aliases: МРП, АЕК\n"
+        "\n"
+        "Carbon markets and climate terms:\n"
+        "GFC = AIFC Green Finance Centre | Центр зеленых финансов МФЦА | АХҚО Жасыл қаржы орталығы | aliases: ЦЗФ, ЖҚО\n"
+        "VCM = Voluntary Carbon Market | Добровольный углеродный рынок | Ерікті көміртегі нарығы\n"
+        "ETS = Emissions Trading System | Система торговли выбросами | Шығарындылармен сауда жүйесі | aliases: СТВ, ШСЖ\n"
+        "СТВ = Emissions Trading System | Система торговли выбросами | Шығарындылармен сауда жүйесі | aliases: ETS, ШСЖ\n"
+        "GHG = Greenhouse Gas | Парниковый газ | Жылыжай газы | aliases: GHGs, ПГ\n"
+        "ПГ = Greenhouse Gas | Парниковые газы | Жылыжай газдары | aliases: GHG, GHGs\n"
+        "CO2 = Carbon Dioxide | Диоксид углерода / Углекислый газ | Көмірқышқыл газы | aliases: CO₂\n"
+        "VCS = Verified Carbon Standard | Верифицированный углеродный стандарт | Расталған көміртегі стандарты\n"
+        "REC = Renewable Energy Certificate / International Renewable Energy Certificate | Сертификат возобновляемой энергии | Жаңартылатын энергия сертификаты | aliases: I-REC, I-RECs, RECs, СВЭ\n"
+        "СВЭ = Renewable Energy Certificate / International Renewable Energy Certificate | Сертификат возобновляемой энергии | Жаңартылатын энергия сертификаты | aliases: REC, I-REC, I-RECs, RECs\n"
+        "ICAP = International Carbon Action Partnership | Международное партнёрство по углеродным действиям | Халықаралық көміртегі іс-шаралар серіктестігі\n"
+        "ICVCM = Integrity Council for the Voluntary Carbon Market | Совет честности добровольного углеродного рынка | Ерікті көміртегі нарығының тұтастық кеңесі\n"
+        "VCMI = Voluntary Carbon Markets Integrity Initiative | Инициатива честности добровольных углеродных рынков | Ерікті көміртегі нарықтары тұтастық бастамасы\n"
+        "CCP = Core Carbon Principles | Основные углеродные принципы | Негізгі көміртегі қағидаттары\n"
+        "CCB = Climate, Community and Biodiversity Standards | Стандарты климата, сообщества и биоразнообразия | Климат, қоғамдастық және биоалуантүрлілік стандарттары\n"
+        "REDD = Reducing Emissions from Deforestation and forest Degradation | Сокращение выбросов от обезлесения и деградации лесов | Ормансыздану мен деградациядан туындаған шығарындыларды азайту\n"
+        "CORSIA = Carbon Offsetting and Reduction Scheme for International Aviation | Схема компенсации и сокращения выбросов для международной авиации | Халықаралық авиациядағы көміртегі өтеу схемасы\n"
+        "ICAO = International Civil Aviation Organization | Международная организация гражданской авиации | Халықаралық азаматтық авиация ұйымы | aliases: ИКАО\n"
+        "ESG = Environmental, Social, and Governance | Экологические, социальные и управленческие критерии | Экологиялық, әлеуметтік және басқарушылық критерийлер\n"
+        "ICROA = International Carbon Reduction and Offset Alliance | Международный альянс по сокращению и компенсации выбросов углерода | Халықаралық көміртегін азайту және өтеу альянсы\n"
+        "IFM = Improved Forest Management | Улучшенное лесоуправление | Жетілдірілген орман шаруашылығы\n"
+        "NFE = Non-Financial Entity | Нефинансовая организация | Қаржылық емес ұйым\n"
+        "MW = Megawatt | Мегаватт | Мегаватт\n"
+        "\n"
+        "Capital markets and exchange terms:\n"
+        "EUA = EU Allowances | Квоты EU ETS | EU ETS квоталары\n"
+        "FEAS = Federation of Euro-Asian Stock Exchanges | Федерация евроазиатских фондовых бирж | Еуразиялық қор биржалары федерациясы\n"
+        "CIBAFI = General Council for Islamic Banks and Financial Institutions | Генеральный совет исламских банков и финансовых институтов | Ислам банктері мен қаржы институттарының бас кеңесі\n"
+        "\n"
+        "Currency and energy terms:\n"
+        "KZT = Kazakhstani Tenge | Казахстанский тенге | Қазақстандық теңге\n"
+        "USD = US Dollar | Доллар США | АҚШ доллары\n"
+        "ВИЭ = Renewable Energy Sources | Возобновляемые источники энергии | Жаңартылатын энергия көздері | aliases: RES, ЖЭК\n"
+        "\n"
+        "Role terms:\n"
+        "CEO = Chief Executive Officer | Генеральный директор | Бас директор"
+    ),
+    "terms": [
+        "AIFC", "МФЦА", "АХҚО", "AFSA", "AIFCA", "AIX", "AEC", "IAC", "GFC", "AML",
+        "CTF", "KYC", "IIN", "ИИН", "EDS", "JSC", "TRP", "PE", "VAT", "CFC",
+        "MCI", "VCM", "ETS", "СТВ", "GHG", "ПГ", "CO2", "VCS", "REC", "СВЭ",
+        "ICAP", "ICVCM", "VCMI", "CCP", "CCB", "REDD", "CORSIA", "ICAO", "ESG",
+        "ICROA", "IFM", "NFE", "MW", "KZT", "USD", "ВИЭ", "EUA", "FEAS", "CIBAFI",
+        "CEO", "АФСА", "ЦЗФ", "ЖҚО", "ПОД", "ПФТ", "ЖСН", "ЭЦП", "ЭЦҚ", "АО",
+        "АҚ", "РВП", "НДС", "ҚҚС", "КИК", "МРП", "АЕК", "ШСЖ", "GHGs", "CO₂",
+        "I-REC", "I-RECs", "RECs", "ИКАО", "RES", "ЖЭК", "FinTech Lab", "Expat Centre",
+        "AIFC Portal", "Public Register", "Carbon Platform", "Astana International Financial Centre",
+        "Международный финансовый центр «Астана»", "Астана Халықаралық Қаржы Орталығы",
+        "Astana Financial Services Authority", "Комитет МФЦА по регулированию финансовых услуг",
+        "АХҚО Қаржылық қызметтер көрсетуді реттеу жөніндегі комитеті", "AIFC Authority",
+        "Администрация МФЦА", "АХҚО әкімшілігі", "Astana International Exchange",
+        "Астанинская международная биржа", "Астана Халықаралық Биржасы", "AIFC Expat Centre",
+        "Экспат центр МФЦА", "АХҚО Экспат орталығы", "International Arbitration Centre",
+        "AIFC Green Finance Centre", "Центр зеленых финансов МФЦА", "АХҚО Жасыл қаржы орталығы",
+        "Anti-Money Laundering", "Counter-Terrorism Financing", "Know Your Customer",
+        "Individual Identification Number", "Electronic Digital Signature", "Temporary Residence Permit",
+        "Value Added Tax", "Controlled Foreign Companies", "Monthly Calculation Index",
+        "Voluntary Carbon Market", "Добровольный углеродный рынок", "Ерікті көміртегі нарығы",
+        "Emissions Trading System", "Система торговли выбросами", "Шығарындылармен сауда жүйесі",
+        "Renewable Energy Certificate", "International Renewable Energy Certificate",
+        "Core Carbon Principles", "Environmental, Social, and Governance",
+        "Federation of Euro-Asian Stock Exchanges",
+        "General Council for Islamic Banks and Financial Institutions",
+    ],
+}
 
 RealtimeCallback = Callable[[str], Any]
 RealtimePartialCallback = Callable[[str], Awaitable[None]]
@@ -175,12 +273,12 @@ class SonioxRealtimeSession:
             else:
                 partial_parts.append(text)
 
-        partial_text = normalize_transcript_abbreviations("".join(partial_parts).strip(), self._language)
+        partial_text = "".join(partial_parts).strip()
         if _valid_live_text(partial_text):
             await self._send_partial(partial_text)
 
         if final_marker is not None:
-            final_text = normalize_transcript_abbreviations("".join(self._pending_final_tokens).strip(), self._language)
+            final_text = "".join(self._pending_final_tokens).strip()
             self._pending_final_tokens = []
             if _valid_committed_text(final_text):
                 appended = self._append_committed(final_text)
@@ -265,10 +363,7 @@ class SonioxRealtimeSession:
         self._audio_bytes_sent = 0
 
     def _joined_committed(self) -> str:
-        return normalize_transcript_abbreviations(
-            " ".join(part.strip() for part in self._committed if part.strip()).strip(),
-            self._language,
-        )
+        return " ".join(part.strip() for part in self._committed if part.strip()).strip()
 
     async def wait_committed(self, timeout_s: float) -> tuple[str, str]:
         try:
@@ -392,33 +487,13 @@ def _soniox_config(
         "enable_language_identification": True,
         "enable_endpoint_detection": SONIOX_STT_ENABLE_ENDPOINT_DETECTION,
         "max_endpoint_delay_ms": SONIOX_STT_MAX_ENDPOINT_DELAY_MS,
-        "context": _load_soniox_context_from_audio_json(),
+        "context": _validate_soniox_context(SONIOX_STT_CONTEXT),
     }
     if audio_format in {"s16le", "pcm_s16le"}:
         config["sample_rate"] = sample_rate or SONIOX_STT_SAMPLE_RATE
         config["num_channels"] = 1
     config["context"] = _fit_context_to_limit(config["context"])
     return config
-
-
-def _load_soniox_context_from_audio_json() -> dict[str, Any]:
-    try:
-        payload = json.loads(SONIOX_STT_CONTEXT_FILE.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise RuntimeError(f"Soniox STT context file not found: {SONIOX_STT_CONTEXT_FILE}") from exc
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Soniox STT context file is invalid JSON: {SONIOX_STT_CONTEXT_FILE}") from exc
-
-    if not isinstance(payload, dict):
-        raise RuntimeError(f"Soniox STT context file must contain a JSON object: {SONIOX_STT_CONTEXT_FILE}")
-
-    context = payload.get("context")
-    if not isinstance(context, dict):
-        raise RuntimeError(
-            f"Soniox STT context file must contain a top-level object key named 'context': {SONIOX_STT_CONTEXT_FILE}"
-        )
-
-    return _validate_soniox_context(context)
 
 
 def _validate_soniox_context(context: dict[str, Any]) -> dict[str, Any]:

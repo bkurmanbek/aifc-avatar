@@ -20,12 +20,16 @@ from .settings import (
     SONIOX_TTS_FORCE_IPV4,
     SONIOX_TTS_KEEPALIVE_INTERVAL_S,
     SONIOX_TTS_MODEL,
+    SONIOX_TTS_PRECONNECT_ATTEMPTS,
     SONIOX_TTS_PRECONNECT_TIMEOUT_S,
     SONIOX_TTS_SAMPLE_RATE,
     SONIOX_TTS_STREAM_TIMEOUT_S,
+    SONIOX_TTS_STREAMING_AVATAR,
     SONIOX_TTS_VOICE,
     SONIOX_TTS_WS_URL,
 )
+from .audio_utils import pcm_to_wav_bytes, silent_wav_bytes
+from .tts_pronunciation import prepare_tts_text
 
 log = logging.getLogger(__name__)
 
@@ -47,23 +51,58 @@ class SonioxRealtimeTTS:
         self._reader_task: asyncio.Task | None = None
         self._keepalive_task: asyncio.Task | None = None
         self._queues: dict[str, asyncio.Queue[dict]] = {}
+        self._closed = False
 
     @property
     def is_pcm_s16le(self) -> bool:
         return self.audio_format == "pcm_s16le"
+
+    @property
+    def supports_streaming_avatar(self) -> bool:
+        return self.is_pcm_s16le and SONIOX_TTS_STREAMING_AVATAR
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    async def synthesize(
+        self,
+        text: str,
+        language: str | None = None,
+        *,
+        lang: str | None = None,
+        priority: int | None = None,
+        voice: str | None = None,
+        expand_context_terms: bool = False,
+    ) -> bytes:
+        del priority
+        language = language or lang
+        text = prepare_tts_text(text, language, expand_context_terms=expand_context_terms)
+        if not text:
+            return silent_wav_bytes(self.sample_rate)
+        pcm = bytearray()
+        async for chunk in self.synthesize_pcm_stream(text, language=language, voice=voice, expand_context_terms=False):
+            pcm.extend(chunk)
+        return pcm_to_wav_bytes(bytes(pcm), self.sample_rate)
 
     async def synthesize_pcm_stream(
         self,
         text: str,
         *,
         language: str | None = None,
+        lang: str | None = None,
         voice: str | None = None,
         client_reference_id: str | None = None,
+        expand_context_terms: bool = False,
     ) -> AsyncGenerator[bytes, None]:
         if not SONIOX_TTS_API_KEY:
             raise RuntimeError("SONIOX_TTS_API_KEY or SONIOX_API_KEY is required for Soniox TTS")
         if not self.is_pcm_s16le:
             raise RuntimeError("Streaming avatar mode requires SONIOX_TTS_AUDIO_FORMAT=pcm_s16le")
+        language = language or lang
+        text = prepare_tts_text(text, language, expand_context_terms=expand_context_terms)
+        if not text:
+            return
 
         stream_id = f"tts-{uuid4().hex}"
         queue: asyncio.Queue[dict] = asyncio.Queue()
@@ -106,13 +145,22 @@ class SonioxRealtimeTTS:
         texts: AsyncIterable[str],
         *,
         language: str | None = None,
+        lang: str | None = None,
         voice: str | None = None,
         client_reference_id: str | None = None,
+        expand_context_terms: bool = False,
     ) -> AsyncGenerator[bytes, None]:
         if not SONIOX_TTS_API_KEY:
             raise RuntimeError("SONIOX_TTS_API_KEY or SONIOX_API_KEY is required for Soniox TTS")
         if not self.is_pcm_s16le:
             raise RuntimeError("Streaming avatar mode requires SONIOX_TTS_AUDIO_FORMAT=pcm_s16le")
+        language = language or lang
+
+        async def prepared_texts() -> AsyncGenerator[str, None]:
+            async for text in texts:
+                prepared = prepare_tts_text(text, language, expand_context_terms=expand_context_terms)
+                if prepared:
+                    yield prepared if prepared.endswith((" ", "\n")) else f"{prepared} "
 
         stream_id = f"tts-{uuid4().hex}"
         queue: asyncio.Queue[dict] = asyncio.Queue()
@@ -128,7 +176,7 @@ class SonioxRealtimeTTS:
                 client_reference_id=client_reference_id,
                 queue=queue,
             )
-            send_task = asyncio.create_task(self._send_text_stream(stream_id, texts))
+            send_task = asyncio.create_task(self._send_text_stream(stream_id, prepared_texts()))
             send_task.add_done_callback(lambda task: self._relay_send_task_error(task, queue))
 
             while True:
@@ -156,10 +204,10 @@ class SonioxRealtimeTTS:
                 with contextlib.suppress(Exception):
                     await self._send_if_open({"stream_id": stream_id, "cancel": True})
 
-    async def preconnect(self, *, attempts: int = 1, timeout_s: float | None = None) -> None:
+    async def preconnect(self, *, attempts: int | None = None, timeout_s: float | None = None) -> None:
         if not SONIOX_TTS_API_KEY:
             return
-        max_attempts = max(1, attempts)
+        max_attempts = max(1, SONIOX_TTS_PRECONNECT_ATTEMPTS if attempts is None else attempts)
         timeout = max(0.5, SONIOX_TTS_PRECONNECT_TIMEOUT_S if timeout_s is None else timeout_s)
         started = perf_counter()
         for attempt in range(max_attempts):
@@ -335,6 +383,9 @@ class SonioxRealtimeTTS:
         self._keepalive_task = None
 
     async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         await self._close_ws()
         self._fail_pending(RuntimeError("Soniox TTS client closed"))
         self._queues.clear()

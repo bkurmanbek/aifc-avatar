@@ -4,12 +4,14 @@ import logging
 import re
 import threading
 from collections import Counter
+from time import time
 from types import SimpleNamespace
 from typing import Any
 
 from rag.service import retrieve
 
 from .language import detect_supported_text_language, normalize_lang
+from .settings import ANSWER_CACHE_TTL_S
 from .spoken_text import rebuild_blocks, sanitize_spoken_text
 
 log = logging.getLogger(__name__)
@@ -217,8 +219,8 @@ def _prebuilt_chitchat_answer(query: str, language: str = "en") -> str | None:
     return None
 
 
-def wrap_spoken_and_details(spoken: str, details: str = "", followups: str = "") -> str:
-    return rebuild_blocks(spoken or "", details or spoken or "", followups or "")
+def wrap_spoken_and_details(spoken: str, details: str = "") -> str:
+    return rebuild_blocks(spoken or "", details or spoken or "")
 
 
 def wrap_answer_for_voice_and_chat(answer: str, *, include_details: bool = True) -> str:
@@ -262,7 +264,14 @@ def _semantic_answer_cache_lookup(query: str) -> dict[str, Any] | None:
     best_index = -1
     best_score = 0.0
     best_entry: dict[str, Any] | None = None
+    now = time()
     with _semantic_answer_cache_lock:
+        if ANSWER_CACHE_TTL_S > 0:
+            _semantic_answer_cache[:] = [
+                entry
+                for entry in _semantic_answer_cache
+                if now - float(entry.get("cached_at", 0.0) or 0.0) <= ANSWER_CACHE_TTL_S
+            ]
         for index, entry in enumerate(_semantic_answer_cache):
             entry_tokens = entry.get("tokens")
             if not isinstance(entry_tokens, set):
@@ -293,7 +302,6 @@ def _semantic_answer_cache_put(
     tagged_answer: str = "",
     raw_answer: str = "",
     details: str = "",
-    followups: str = "",
 ) -> None:
     del follow_up, handoff_required
     tokens = _tokens(rewritten_query)
@@ -311,7 +319,7 @@ def _semantic_answer_cache_put(
         "raw_answer": raw_answer,
         "spoken": answer,
         "details": details,
-        "followups": followups,
+        "cached_at": time(),
     }
     with _semantic_answer_cache_lock:
         _semantic_answer_cache.append(entry)

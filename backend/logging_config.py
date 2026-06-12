@@ -76,7 +76,7 @@ def configure_logging(*, reset: bool = False) -> None:
     module_filters: dict[str, tuple[str, ...]] = {
         "stt": ("backend.stt",),
         "llm": ("backend.llm", "backend.answer_race"),
-        "tts": ("backend.tts", "backend.soniox_tts"),
+        "tts": ("backend.soniox_tts",),
         "avatar": ("backend.synctalk",),
         "pipeline": ("backend.main", "backend.response_stream", "backend.answer_format", "backend.intro", "backend.startup"),
         "websocket": ("backend.ws_writer", "backend.client"),

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import contextlib
 import json
 import logging
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from dataclasses import dataclass, field
 from time import perf_counter
@@ -34,13 +36,13 @@ from .settings import (
     SONIOX_STT_KEEPALIVE_INTERVAL_S,
     SONIOX_STT_ENDPOINT_WAIT_S,
     SONIOX_STT_PRECONNECT,
+    TTS_PREWARM_QUERY_WAIT_S,
 )
+from .soniox_tts import SonioxRealtimeTTS
 from .stt import SonioxBatchSTT, SonioxRealtimeSession, looks_like_pcm16_chunk
 from .synctalk import SyncTalkClient
-from .tts import ElevenTTS
 from .ws_writer import ClientClosedError, WsWriter
-from .answer_race import AnswerRaceResult, clear_answer_caches, run_answer_race
-from .abbreviations import normalize_transcript_abbreviations
+from .answer_race import AnswerRaceResult, clear_answer_caches, run_answer_race, shutdown_answer_race_executor
 from .original_backend import (
     _prebuilt_chitchat_answer,
     update_conversation_memory,
@@ -55,21 +57,16 @@ from backend.answer_format import (
     build_tts_chunks as _build_tts_chunks,
     coerce_prompt_contract_payload as _coerce_prompt_contract_payload,
     details_from_spoken as _details_from_spoken,
-    extract_answer_from_json as _extract_answer_from_json,
     extract_json_any as _extract_json_any,
     is_final_turn_candidate as _is_final_turn_candidate,
     json_to_markdown_details as _json_to_markdown_details,
     limit_answer_details as _limit_answer_details,
     limit_text_for_answer_voice as _limit_text_for_answer_voice,
-    normalize_followup_questions as _normalize_followup_questions,
     normalize_query_signature as _normalize_query_signature,
     normalize_spoken_for_tts as _normalize_spoken_for_tts,
     normalize_tagged_answer as _normalize_tagged_answer,
     normalize_tts_chunk_for_language as _normalize_tts_chunk_for_language,
-    normalize_tts_chunks as _normalize_tts_chunks,
-    remaining_spoken_suffix as _remaining_spoken_suffix,
-    signature_for_interruption as _signature_for_interruption,
-    tagged_answer_with_full_details_voice as _tagged_answer_with_full_details_voice,
+    voice_text_from_details as _voice_text_from_details,
 )
 from backend.intro import (
     INTRO_CACHED_FRAME_BATCH as _INTRO_CACHED_FRAME_BATCH,
@@ -87,7 +84,7 @@ from backend.intro import (
     load_intro_frames_from_cache as _load_intro_frames_from_cache,
     mark_intro_token_in_progress as _mark_intro_token_in_progress,
     mark_intro_token_played as _mark_intro_token_played,
-    prebuild_intro_audio_cache as pipeline_prebuild_intro_audio_cache,
+    prebuild_intro_cache as pipeline_prebuild_intro_cache,
     safe_cache_key as _safe_cache_key,
     save_intro_frames_to_cache as _save_intro_frames_to_cache,
 )
@@ -97,30 +94,27 @@ from backend.startup import (
     shutdown_keepwarm as pipeline_shutdown_keepwarm,
     startup_prewarm as pipeline_startup_prewarm,
 )
+from backend.external_rag import close_external_rag_client as pipeline_close_external_rag_client
 
-configure_logging(reset=False)
 log = logging.getLogger(__name__)
 
-app = FastAPI()
 
-
-@app.on_event("startup")
-async def _prebuild_intro_audio_cache() -> None:
-    await pipeline_prebuild_intro_audio_cache()
-
-
-@app.on_event("startup")
-async def startup_prewarm() -> None:
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    configure_logging(reset=False)
+    await pipeline_prebuild_intro_cache()
     await pipeline_startup_prewarm()
+    try:
+        yield
+    finally:
+        await pipeline_shutdown_keepwarm()
+        await pipeline_close_external_rag_client()
+        shutdown_answer_race_executor()
 
 
-@app.on_event("shutdown")
-async def shutdown_keepwarm() -> None:
-    await pipeline_shutdown_keepwarm()
+app = FastAPI(lifespan=lifespan)
 
 
-_PARTIAL_INTERRUPT_WINDOW_S = 1.2
-_PARTIAL_INTERRUPT_HITS = 2
 _INTERRUPT_COOLDOWN_S = 1.0
 _DUPLICATE_FINAL_AUDIO_IGNORE_S = 6.0
 _DUP_QUERY_WINDOW_S = 1.5
@@ -172,7 +166,7 @@ class ClientSession:
     websocket: WebSocket
     writer: WsWriter
     batch_stt: SonioxBatchSTT
-    tts: ElevenTTS
+    tts: SonioxRealtimeTTS
     synctalk: SyncTalkClient
     session_id: str = field(default_factory=lambda: uuid4().hex)
     history: list[dict[str, str]] = field(default_factory=list)
@@ -193,15 +187,9 @@ class ClientSession:
     barge_in_triggered: bool = False
     _last_query_signature: str = ""
     _last_query_at: float = 0.0
-    _interrupt_signature: str = ""
-    _interrupt_hits: int = 0
-    _interrupt_started_at: float = 0.0
     _interrupt_last_at: float = 0.0
 
     def _reset_interrupt_state(self) -> None:
-        self._interrupt_signature = ""
-        self._interrupt_hits = 0
-        self._interrupt_started_at = 0.0
         self._interrupt_last_at = 0.0
 
     def on_send(self, data: dict) -> None:
@@ -334,6 +322,21 @@ class ClientSession:
         self.tts_prewarm_task = asyncio.create_task(preconnect())
         self.tts_prewarm_task.add_done_callback(_log_background_task_error)
 
+    async def wait_realtime_tts_ready(self, *, timeout_s: float | None = None) -> None:
+        preconnect = getattr(self.tts, "preconnect", None)
+        if preconnect is None:
+            return
+        if self.tts_prewarm_task is None:
+            self.prewarm_realtime_tts()
+        task = self.tts_prewarm_task
+        if task is None or task.done():
+            return
+        timeout = TTS_PREWARM_QUERY_WAIT_S if timeout_s is None else timeout_s
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=max(0.1, timeout))
+        except asyncio.TimeoutError:
+            log_event(log, "tts_prewarm_wait_timeout", session_id=self.session_id, timeout_s=timeout)
+
     async def _close_realtime_tts(self, *, reason: str = "close", recreate: bool = False, prewarm: bool = False) -> None:
         if self.tts_prewarm_task is not None and not self.tts_prewarm_task.done():
             self.tts_prewarm_task.cancel()
@@ -346,7 +349,7 @@ class ClientSession:
         if not was_closed:
             log_event(log, "tts_realtime_closed", session_id=self.session_id, reason=reason)
         if recreate:
-            self.tts = ElevenTTS()
+            self.tts = SonioxRealtimeTTS()
             if prewarm:
                 self.prewarm_realtime_tts()
 
@@ -358,7 +361,6 @@ class ClientSession:
             return False
         if not intro_token or _intro_token_seen(intro_token) or _intro_token_in_progress(intro_token):
             return False
-        _mark_intro_token_played(intro_token)
         _mark_intro_token_in_progress(intro_token or "")
         self.pipeline_task = asyncio.create_task(self.run_intro(intro_blocks, intro_token=intro_token))
         self.pipeline_task.add_done_callback(_log_background_task_error)
@@ -512,23 +514,7 @@ class ClientSession:
         now = perf_counter()
         if now - self._interrupt_last_at < _INTERRUPT_COOLDOWN_S and self._interrupt_last_at > 0:
             return
-
-        signature = _signature_for_interruption(text)
-        if not signature:
-            self._reset_interrupt_state()
-            return
-
-        if signature == self._interrupt_signature and now - self._interrupt_started_at <= _PARTIAL_INTERRUPT_WINDOW_S:
-            self._interrupt_hits += 1
-        else:
-            self._interrupt_signature = signature
-            self._interrupt_started_at = now
-            self._interrupt_hits = 1
-
         self._interrupt_last_at = now
-
-        if self._interrupt_hits < _PARTIAL_INTERRUPT_HITS:
-            return
 
         log_event(log, "barge_in_partial", session_id=self.session_id, request_id=self.active_turn_id, partial=text[:80])
         self.barge_in_triggered = True
@@ -579,18 +565,31 @@ class ClientSession:
         log_event(log, "session_reset", session_id=self.session_id)
 
     async def handle_message(self, payload: dict) -> None:
+        if not isinstance(payload, dict):
+            await self.writer.send({"type": "error", "text": "Invalid message payload"})
+            return
         msg_type = payload.get("type")
         log_event(log, "ws_message", session_id=self.session_id, request_id=self.active_turn_id, message_type=msg_type)
         if msg_type == "audio_chunk":
-            await self.handle_audio_chunk(base64.b64decode(payload["data"]))
+            chunk = await self._decode_audio_payload(payload)
+            if chunk is None:
+                return
+            await self.handle_audio_chunk(chunk)
         elif msg_type == "audio":
-            await self.handle_audio(base64.b64decode(payload["data"]))
+            chunk = await self._decode_audio_payload(payload)
+            if chunk is None:
+                return
+            await self.handle_audio(chunk)
         elif msg_type == "prepare_stt":
             await self.ensure_realtime_stt(status=True)
         elif msg_type == "close_stt":
             log_event(log, "stt_close_ignored_persistent", session_id=self.session_id)
         elif msg_type == "text":
-            await self.handle_text(payload.get("text", ""))
+            text = payload.get("text", "")
+            if not isinstance(text, str):
+                await self.writer.send({"type": "error", "text": "Invalid text payload"})
+                return
+            await self.handle_text(text)
         elif msg_type == "interrupt":
             await self.interrupt(send_event=False)
         elif msg_type == "reset":
@@ -614,6 +613,19 @@ class ClientSession:
                 message=str(payload.get("message") or ""),
                 detail=json.dumps(payload.get("detail"), ensure_ascii=False, default=str)[:1200],
             )
+        else:
+            await self.writer.send({"type": "error", "text": f"Unsupported message type: {msg_type}"})
+
+    async def _decode_audio_payload(self, payload: dict) -> bytes | None:
+        data = payload.get("data")
+        if not isinstance(data, str) or not data:
+            await self.writer.send({"type": "error", "text": "Missing audio data"})
+            return None
+        try:
+            return base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError):
+            await self.writer.send({"type": "error", "text": "Invalid audio data"})
+            return None
 
     async def handle_audio_chunk(self, chunk: bytes) -> None:
         if perf_counter() < self.ignore_audio_until:
@@ -720,7 +732,7 @@ class ClientSession:
     async def process_final_transcript(self, text: str, language: str, metrics: TurnMetrics) -> None:
         provider_language = language
         provider_language_norm = supported_lang_or_none(language)
-        text = normalize_transcript_abbreviations(dedupe_repeated_transcript(text), provider_language_norm)
+        text = dedupe_repeated_transcript(text)
         detected_language = provider_language_norm or detect_supported_text_language(text)
         if not text or not transcript_has_meaningful_speech(text):
             log_event(log, "transcript_rejected", session_id=self.session_id, reason="empty_or_not_speech", provider_lang=provider_language, text=text[:120])
@@ -771,7 +783,7 @@ class ClientSession:
     async def handle_text(self, text: str) -> None:
         raw_text = text.strip()
         detected_language = detect_supported_text_language(raw_text)
-        text = normalize_transcript_abbreviations(raw_text, detected_language)
+        text = raw_text
         if not text:
             return
         detected_language = detected_language or detect_supported_text_language(text)
@@ -806,13 +818,11 @@ class ClientSession:
         raw_answer = ""
         json_payload: dict[str, object] | None = None
         contract_payload: dict | None = None
-        contract_followups: list[str] = []
         tagged_answer = ""
         race_result: AnswerRaceResult | None = None
         plan = SimpleNamespace(answer_language=language)
         chunks: list[dict] = []
         policy_language: str | None = None
-        live_voice_text = ""
 
         async def ensure_response_stream(
             plan_update: object | None = None,
@@ -848,15 +858,6 @@ class ClientSession:
                 metrics.plan_done_at = perf_counter()
             await ensure_response_stream(plan_update, chunks_update)
 
-        async def on_gemini_voice_delta(text_delta: str, emitted_chars: int, complete: bool) -> None:
-            del emitted_chars, complete
-            nonlocal live_voice_text
-            if not text_delta.strip():
-                return
-            response_stream = await ensure_response_stream()
-            live_voice_text += text_delta
-            await response_stream.feed(text_delta)
-
         try:
             log_event(log, "pipeline_start", session_id=self.session_id, request_id=turn_id, mode=metrics.mode, language=language, interrupted=interrupted_input, query=query[:160])
             self.history.append({"role": "user", "content": query})
@@ -869,7 +870,7 @@ class ClientSession:
                 metrics.plan_done_at = perf_counter()
                 fast_hit = None
                 stream = await ensure_response_stream()
-                tagged_answer = wrap_answer_for_voice_and_chat(direct_reply, include_details=False)
+                tagged_answer = wrap_answer_for_voice_and_chat(direct_reply, include_details=True)
                 metrics.llm_done_at = perf_counter()
                 log_event(log, "llm_direct_reply", session_id=self.session_id, request_id=turn_id, latency_ms=(metrics.llm_done_at - metrics.started_at) * 1000)
             else:
@@ -880,7 +881,6 @@ class ClientSession:
                     history_before_current,
                     self.conversation_memory,
                     on_gemini_context_ready=on_gemini_context_ready,
-                    on_gemini_voice_delta=on_gemini_voice_delta,
                 )
                 metrics.race_timings.update(race_result.timings)
                 winner = race_result.winner
@@ -900,56 +900,58 @@ class ClientSession:
 
             json_payload = _extract_json_any(raw_answer)
             if isinstance(json_payload, dict):
-                contract_payload, _, contract_followups = _coerce_prompt_contract_payload(json_payload, interrupted_input, language)
+                contract_payload, _, _ = _coerce_prompt_contract_payload(json_payload, interrupted_input, language)
 
             if metrics.llm_done_at is None:
                 metrics.llm_done_at = perf_counter()
 
-            if not direct_reply and not tagged_answer:
-                tagged_from_json = _json_payload_to_tagged_answer(json_payload) if isinstance(json_payload, dict) else None
-                if not tagged_from_json:
-                    tagged_from_json = _extract_answer_from_json(raw_answer)
-                if not tagged_from_json:
-                    tagged_from_json = _normalize_tagged_answer(raw_answer)
-                tagged_answer = tagged_from_json
-
-            tagged_answer, full_details_voice = await _tagged_answer_with_full_details_voice(
-                tagged_answer,
-                contract_payload,
-                language,
-            )
+            if not direct_reply and contract_payload is None and not tagged_answer:
+                tagged_answer = _normalize_tagged_answer(raw_answer)
             metrics.spoken_ready_at = perf_counter()
             log_event(log, "spoken_ready", session_id=self.session_id, request_id=turn_id, latency_ms=(metrics.spoken_ready_at - metrics.started_at) * 1000)
 
             metrics.postprocess_done_at = perf_counter()
-            if not stream.spoken_text.strip():
-                await stream.feed(_normalize_tagged_answer(tagged_answer))
-                await stream.flush()
-            payload = stream.build_answer_payload()
+            await self.wait_realtime_tts_ready()
             if contract_payload is not None:
+                details = _limit_answer_details(
+                    _enforce_prompt_details(
+                        contract_payload.get("details"),
+                        0,
+                    )
+                )
+                details["language"] = language
+                spoken = str(contract_payload.get("spoken") or "").strip()
+                if not spoken:
+                    details_voice = _limit_text_for_answer_voice(_voice_text_from_details(details, language), language)
+                    spoken = await _normalize_spoken_for_tts(details_voice, language, trim_for_latency=True)
+                details_text = _json_to_markdown_details(details)
+                await stream.emit_spoken_text(spoken)
+                if details_text:
+                    await stream.emit_details_text(details_text)
+                await stream.flush()
+
+                payload = stream.build_answer_payload()
                 payload["control"] = contract_payload.get("control", _build_control_payload({}, interrupted_input))
-                payload["details"] = contract_payload.get("details", payload.get("details", {}))
-                payload["tts_chunks"] = _normalize_tts_chunks(contract_payload.get("tts_chunks"))
-                payload["follow_up_questions"] = _normalize_followup_questions(contract_payload.get("follow_up_questions"))
-                payload["answer_contract"] = contract_payload.get("answer_contract", {})
-                contract_details = contract_payload.get("details", {})
-                if isinstance(contract_details, dict):
-                    contract_points = [str(item).strip() for item in contract_details.get("points", []) if str(item).strip()]
-                    if contract_points:
-                        payload["key_points"] = [
-                            {
-                                "id": f"point-{idx + 1}",
-                                "label": f"Point {idx + 1}",
-                                "preview": point,
-                                "section_index": idx,
-                            }
-                            for idx, point in enumerate(contract_points[:4])
-                        ]
-                if contract_followups:
-                    payload["follow_up_questions"] = contract_followups[:3]
-                if not payload.get("tts_chunks"):
-                    payload["tts_chunks"] = _build_tts_chunks(payload.get("spoken", ""), language)
+                payload["spoken"] = spoken
+                payload["details"] = details
+                payload["follow_up_questions"] = []
+                payload["answer_contract"] = details
+                contract_points = [str(item).strip() for item in details.get("points", []) if str(item).strip()]
+                if contract_points:
+                    payload["key_points"] = [
+                        {
+                            "id": f"point-{idx + 1}",
+                            "label": f"Point {idx + 1}",
+                            "preview": point,
+                            "section_index": idx,
+                        }
+                        for idx, point in enumerate(contract_points[:4])
+                    ]
             else:
+                if not stream.spoken_text.strip():
+                    await stream.feed(_normalize_tagged_answer(tagged_answer))
+                    await stream.flush()
+                payload = stream.build_answer_payload()
                 payload["control"] = _build_control_payload({}, interrupted_input)
                 payload.setdefault("tts_chunks", _build_tts_chunks(payload.get("spoken", ""), language))
                 payload["spoken"] = await _normalize_spoken_for_tts(payload.get("spoken", ""), language, trim_for_latency=False)
@@ -966,7 +968,7 @@ class ClientSession:
                 payload["spoken"] = await _normalize_spoken_for_tts(
                     direct_reply,
                     language,
-                    trim_for_latency=False,
+                    trim_for_latency=True,
                 )
                 payload["details"] = _details_from_spoken(
                     str(payload.get("spoken", "")),
@@ -981,18 +983,13 @@ class ClientSession:
                     chars=len(str(payload.get("spoken", ""))),
                 )
             else:
-                details_voice = _json_to_markdown_details(payload.get("details")).strip()
-                if not details_voice and full_details_voice:
-                    details_voice = full_details_voice
+                details_voice = _voice_text_from_details(payload.get("details"), language).strip()
                 details_voice = _limit_text_for_answer_voice(details_voice, language)
                 payload["spoken"] = await _normalize_spoken_for_tts(
                     details_voice or _limit_text_for_answer_voice(str(payload.get("spoken", "")), language),
                     language,
-                    trim_for_latency=False,
+                    trim_for_latency=True,
                 )
-                remaining_voice = _remaining_spoken_suffix(str(payload.get("spoken", "")), live_voice_text or stream.spoken_text)
-                if remaining_voice:
-                    await stream.feed(remaining_voice)
             await stream.flush()
             payload["tts_chunks"] = [
                 chunk
@@ -1010,6 +1007,7 @@ class ClientSession:
                 details["confidence"] = winner.score
                 details["answer_kind"] = "fallback" if winner.fallback else details.get("answer_kind", "direct")
                 details["citations"] = winner.citations or details.get("citations", [])
+                details["language"] = language
                 if winner.fallback:
                     details["requires_follow_up"] = True
                     details["fallback_site"] = "aifc.kz"
@@ -1034,6 +1032,8 @@ class ClientSession:
                     payload.get("details"),
                     len(payload.get("follow_up_questions", [])),
                 )
+            if isinstance(payload.get("details"), dict):
+                payload["details"]["language"] = language
             payload["answer_contract"] = payload["details"]
             metrics.payload_done_at = perf_counter()
             await self.writer.send({"type": "answer_payload", "turn_id": turn_id, **payload})
@@ -1058,16 +1058,16 @@ class ClientSession:
             await self.writer.send({"type": "done", "chunks": stream.chunk_count, "turn_id": turn_id, "latency_ms": latency_ms})
         except asyncio.CancelledError:
             if stream is not None:
-                stream.cancel_all()
+                await stream.cancel_all()
             raise
         except ClientClosedError:
             if stream is not None:
-                stream.cancel_all()
+                await stream.cancel_all()
         except Exception:
             log.exception("query pipeline failed")
             log_event(log, "pipeline_failed", session_id=self.session_id, request_id=turn_id, level=logging.ERROR)
             if stream is not None:
-                stream.cancel_all()
+                await stream.cancel_all()
             await self.writer.send({"type": "error", "text": "Response generation failed", "turn_id": turn_id})
         finally:
             self.pipeline_task = None
@@ -1091,6 +1091,7 @@ async def clear_runtime_caches() -> dict[str, object]:
 @app.get("/intro-cache/{avatar}/{block_key}")
 async def intro_cache_frames(avatar: str, block_key: str, start: int = 0, limit: int = 0) -> JSONResponse:
     safe_avatar = _safe_cache_key(avatar)
+    expected_avatar = _safe_cache_key(INTRO_AVATAR_CACHE_KEY)
     safe_key = _canonical_intro_key(block_key)
     if safe_key is None:
         raise HTTPException(status_code=404, detail="intro block not found")
@@ -1105,7 +1106,7 @@ async def intro_cache_frames(avatar: str, block_key: str, start: int = 0, limit:
             cached_payload = json.loads(range_path.read_text(encoding="utf-8"))
             if (
                 cached_payload.get("signature") == _intro_frame_signature(block)
-                and cached_payload.get("avatar") == safe_avatar == INTRO_AVATAR_CACHE_KEY
+                and cached_payload.get("avatar") == safe_avatar == expected_avatar
                 and isinstance(cached_payload.get("frames"), list)
             ):
                 return JSONResponse(
@@ -1160,19 +1161,26 @@ async def websocket_endpoint(websocket: WebSocket):
         websocket=websocket,
         writer=writer,
         batch_stt=SonioxBatchSTT(),
-        tts=ElevenTTS(),
+        tts=SonioxRealtimeTTS(),
         synctalk=SyncTalkClient(),
     )
-    writer._on_send = session.on_send
+    writer.set_on_send(session.on_send)
     log_event(log, "websocket_connected", session_id=session.session_id)
     await writer.send({"type": "session_state", "session_id": session.session_id, "state": "connected"})
-    intro_started = False
-    intro_started = session.start_intro(intro_token or None)
+    session.start_intro(intro_token or None)
     session.prewarm_realtime_stt(force=True)
     session.prewarm_realtime_tts()
     try:
         while True:
-            payload = json.loads(await websocket.receive_text())
+            raw_payload = await websocket.receive_text()
+            try:
+                payload = json.loads(raw_payload)
+            except json.JSONDecodeError:
+                await writer.send({"type": "error", "text": "Invalid JSON payload"})
+                continue
+            if not isinstance(payload, dict):
+                await writer.send({"type": "error", "text": "Invalid message payload"})
+                continue
             await session.handle_message(payload)
     except WebSocketDisconnect:
         log.info("ws disconnected")

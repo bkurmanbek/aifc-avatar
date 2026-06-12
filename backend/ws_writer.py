@@ -18,6 +18,9 @@ class WsWriter:
         self._on_send = on_send
         self._active_turn_id: str | None = None
 
+    def set_on_send(self, on_send: Callable[[dict], None] | None) -> None:
+        self._on_send = on_send
+
     def set_active_turn(self, turn_id: str) -> None:
         self._active_turn_id = turn_id
 

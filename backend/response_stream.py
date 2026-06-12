@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import logging
 import re
 from time import perf_counter
@@ -19,17 +20,19 @@ from .settings import (
     SONIOX_TTS_MAX_SEGMENT_MS,
     SONIOX_TTS_MIN_SEGMENT_MS,
     SONIOX_TTS_SEGMENT_MS,
+    SYNCTALK_MAX_CONCURRENCY,
 )
-from .tts import pcm_to_wav_bytes
+from .audio_utils import pcm_to_wav_bytes
 from .ws_writer import ClientClosedError
 
 log = logging.getLogger(__name__)
 
 _SENTENCE_BATCH_SIZE = 3
 _SENTENCE_BATCH_WAIT_S = 0.06
-_AVATAR_WORKER_COUNT = 2
+_AVATAR_WORKER_COUNT = 1
+_SYNCTALK_SEMAPHORE: asyncio.Semaphore | None = None
 
-_TAG_RE = re.compile(r"\[\[(/?)(spoken|details|followups)\]\]", re.IGNORECASE)
+_TAG_RE = re.compile(r"\[\[(/?)(spoken|details)\]\]", re.IGNORECASE)
 _SECTION_TITLE_RE = re.compile(r"^#{1,6}\s+(.+)$")
 
 
@@ -79,7 +82,6 @@ class ResponseStream:
         self._first_spoken_chunk_recorded = False
         self.spoken_text = ""
         self.details_text = ""
-        self.followups_text = ""
         self.full_reply = ""
 
     @property
@@ -114,6 +116,12 @@ class ResponseStream:
             await self._emit_spoken_sentence(sentence)
             self._schedule_spoken_chunk(sentence, idx, lang)
 
+    async def emit_spoken_text(self, text: str) -> None:
+        await self._emit_spoken_incremental(text)
+
+    async def emit_details_text(self, text: str) -> None:
+        await self._emit_details_incremental(text)
+
     async def _drain_pending(self, *, final: bool) -> None:
         while self._buffer:
             match = _TAG_RE.search(self._buffer)
@@ -139,11 +147,7 @@ class ResponseStream:
         if section == "spoken":
             await self._emit_spoken_incremental(text)
         elif section == "details":
-            self.details_text += text
-            self.full_reply += text
-        elif section == "followups":
-            self.followups_text += text
-            self.full_reply += text
+            await self._emit_details_incremental(text)
 
     async def _emit_spoken_incremental(self, text: str) -> None:
         if not text:
@@ -159,7 +163,14 @@ class ResponseStream:
         cleaned = sentence.strip()
         if not cleaned:
             return
-        await self._writer.send(self._event({"type": "response_chunk", "text": cleaned + " "}))
+
+    async def _emit_details_incremental(self, text: str) -> None:
+        if not text:
+            return
+        self.details_text += text
+        self.full_reply += text
+        if text.strip():
+            await self._writer.send(self._event({"type": "response_chunk", "text": text}))
 
     def _schedule_spoken_chunk(self, sentence: str, idx: int, lang: str | None) -> None:
         cleaned = sanitize_spoken_text(sentence)
@@ -316,9 +327,6 @@ class ResponseStream:
             log.exception("streaming TTS/avatar segment failed: source_idx=%s", source_idx)
             await self._fail_next_media_chunk(f"TTS failed: {exc}")
 
-    async def _run_streaming_sentence(self, sentence: str, text_idx: int, lang: str | None) -> None:
-        await self._run_streaming_sentence_batch([(sentence, text_idx, lang)])
-
     async def _run_streaming_avatar_worker(self) -> None:
         if self._avatar_queue is None:
             return
@@ -331,21 +339,22 @@ class ResponseStream:
             started = perf_counter()
             try:
                 log_event(log, "avatar_chunk_start", request_id=self._turn_id, chunk=media_idx, bytes=len(audio_wav))
-                async for frame in self._synctalk.infer_stream(
-                    audio_wav,
-                    priority=0 if media_idx == 0 else 1,
-                    chunk_idx=media_idx,
-                ):
-                    frame_count += 1
-                    if frame_count == 1:
-                        log_event(
-                            log,
-                            "avatar_first_frame",
-                            request_id=self._turn_id,
-                            chunk=media_idx,
-                            latency_ms=(perf_counter() - started) * 1000,
-                        )
-                    await self._writer.send(self._event({"type": "frame", "data": frame, "chunk": media_idx}))
+                async with _synctalk_semaphore():
+                    async for frame in self._synctalk.infer_stream(
+                        audio_wav,
+                        priority=0 if media_idx == 0 else 1,
+                        chunk_idx=media_idx,
+                    ):
+                        frame_count += 1
+                        if frame_count == 1:
+                            log_event(
+                                log,
+                                "avatar_first_frame",
+                                request_id=self._turn_id,
+                                chunk=media_idx,
+                                latency_ms=(perf_counter() - started) * 1000,
+                            )
+                        await self._writer.send(self._event({"type": "frame", "data": frame, "chunk": media_idx}))
             except ClientClosedError:
                 raise
             except asyncio.CancelledError:
@@ -464,14 +473,6 @@ class ResponseStream:
             sections.append(current)
         return sections
 
-    def _followups(self) -> list[str]:
-        items: list[str] = []
-        for line in (self.followups_text or "").splitlines():
-            cleaned = line.strip(" -\t")
-            if cleaned:
-                items.append(cleaned)
-        return items[:3]
-
     def build_answer_payload(self) -> dict:
         spoken = sanitize_spoken_text(self.spoken_text, keep_digits=True)
         summary = self._detail_summary()
@@ -503,7 +504,7 @@ class ResponseStream:
                 "notes": [],
             },
             "key_points": key_points,
-            "follow_up_questions": self._followups(),
+            "follow_up_questions": [],
         }
 
     async def wait_all(self) -> None:
@@ -513,12 +514,35 @@ class ResponseStream:
                 self._media_queue.put_nowait(None)
         if not self._chunk_tasks:
             return
-        await asyncio.gather(*self._chunk_tasks, return_exceptions=True)
+        results = await asyncio.gather(*self._chunk_tasks, return_exceptions=True)
+        _log_task_results(results)
 
-    def cancel_all(self) -> None:
+    async def cancel_all(self) -> None:
+        if self._media_queue is not None and not self._media_closed:
+            self._media_closed = True
+            with contextlib.suppress(Exception):
+                self._media_queue.put_nowait(None)
         for task in self._chunk_tasks:
             if not task.done():
                 task.cancel()
+        if self._chunk_tasks:
+            results = await asyncio.gather(*self._chunk_tasks, return_exceptions=True)
+            _log_task_results(results)
+
+
+def _synctalk_semaphore() -> asyncio.Semaphore:
+    global _SYNCTALK_SEMAPHORE
+    if _SYNCTALK_SEMAPHORE is None:
+        _SYNCTALK_SEMAPHORE = asyncio.Semaphore(max(1, SYNCTALK_MAX_CONCURRENCY))
+    return _SYNCTALK_SEMAPHORE
+
+
+def _log_task_results(results: list[object]) -> None:
+    for result in results:
+        if isinstance(result, asyncio.CancelledError):
+            continue
+        if isinstance(result, BaseException):
+            log.error("response media task failed", exc_info=(type(result), result, result.__traceback__))
 
 
 def _pcm_bytes_for_ms(sample_rate: int, ms: int) -> int:

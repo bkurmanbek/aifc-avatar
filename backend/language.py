@@ -396,7 +396,10 @@ def dedupe_repeated_transcript(text: str) -> str:
 
 def is_stop_command(text: str) -> bool:
     normalized = " ".join(text.lower().strip().split())
-    return normalized in STOP_KEYWORDS or any(word in normalized for word in ("стоп", "stop", "тоқта"))
+    if normalized in STOP_KEYWORDS:
+        return True
+    words = set(_WORD_RE.findall(normalized))
+    return bool(words & {"стоп", "stop", "тоқта"})
 
 
 def is_noise_utterance(text: str) -> bool:

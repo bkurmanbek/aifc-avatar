@@ -23,12 +23,8 @@ from backend.settings import (
     MAX_TTS_CHARS,
     MIN_TTS_CHARS,
     SHORT_SENTENCE_CHARS,
-    SONIOX_TTS_CONTEXT_FILE,
 )
 from backend.spoken_text import (
-    extract_blocks,
-    is_speakable_text,
-    rebuild_blocks,
     remove_repeated_sentences,
     sanitize_spoken_text,
 )
@@ -46,6 +42,7 @@ _NOISE_REPLY_BY_LANGUAGE = {
 _MAX_SPOKEN_WORDS = 28
 _MAX_SPOKEN_CHARS = 180
 _SPOKEN_SOFT_CUT_RE = re.compile(r"[,;:，；、]")
+_COMPACT_VOICE_MAX_CHARS = 260
 _FINAL_DOMAIN_TERMS = {
     "aifc", "afsa", "aix", "iac", "fintech", "expat", "centre", "center",
     "мфца", "ахқо", "афса", "экспат", "центр", "орталық", "орталығы",
@@ -65,32 +62,6 @@ def signature_for_interruption(text: str) -> str:
     normalized = (text or "").strip().lower()
     normalized = _NORMALIZED_QUERY_PUNCT_RE.sub("", normalized)
     return re.sub(r"\s+", " ", normalized).strip()
-
-
-def _default_followups(language: str) -> list[str]:
-    if language == "ru":
-        return [
-            "Можете перечислить ключевые требования?",
-            "Какой следующий шаг важнее всего?",
-            "Куда лучше обратиться для подачи?",
-        ]
-    if language == "kk":
-        return [
-            "Негізгі талаптарды қысқаша айтасыз ба?",
-            "Ең бірінші орында не істеу керек?",
-            "Қай бөлімі бойынша көмек керек?",
-        ]
-    if language == "zh":
-        return [
-            "你能给出关键要求吗？",
-            "下一步最重要的是什么？",
-            "你建议我从哪里开始？",
-        ]
-    return [
-        "Can you list the key requirements?",
-        "What is the next most important step?",
-        "Where should I start first?",
-    ]
 
 
 def coerce_confidence(value: object) -> float:
@@ -132,21 +103,10 @@ def normalize_answer_kind(value: object) -> str:
     return value_norm if value_norm in allowed else "direct"
 
 
-def normalize_tts_chunks(chunks: object) -> list[str]:
-    if not isinstance(chunks, list):
-        return []
-    output: list[str] = []
-    for chunk in chunks:
-        text = str(chunk).strip()
-        if text:
-            output.append(text)
-    return output
-
-
 def normalize_tts_chunk_for_language(text: str, language: str) -> str:
     has_leading_space = bool(text and text[0].isspace())
     has_trailing_space = bool(text and text[-1].isspace())
-    cleaned = prepare_tts_text(text, language, SONIOX_TTS_CONTEXT_FILE)
+    cleaned = prepare_tts_text(text, language)
     if cleaned and has_leading_space and not cleaned.startswith(" "):
         cleaned = " " + cleaned
     if cleaned and has_trailing_space and not cleaned.endswith(" "):
@@ -316,13 +276,13 @@ def _trim_spoken_for_latency(text: str, language: str) -> str:
         return spoken[:45].rstrip("，；、,;: ") + "。"
 
     words = spoken.split()
-    if len(words) <= _MAX_SPOKEN_WORDS and len(spoken) <= _MAX_SPOKEN_CHARS:
-        return spoken
-
     for match in _SPOKEN_SOFT_CUT_RE.finditer(spoken):
         idx = match.start()
         if 45 <= idx <= _MAX_SPOKEN_CHARS:
             return spoken[:idx].rstrip(" ,;:，；、") + "."
+
+    if len(words) <= _MAX_SPOKEN_WORDS and len(spoken) <= _MAX_SPOKEN_CHARS:
+        return spoken
 
     if len(words) > _MAX_SPOKEN_WORDS:
         return " ".join(words[:_MAX_SPOKEN_WORDS]).rstrip(" ,;:") + "."
@@ -372,6 +332,33 @@ def limit_text_for_answer_voice(text: str, language: str | None = None) -> str:
     if out:
         return " ".join(out).strip()
 
+    return spoken[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:") + "."
+
+
+def _compact_voice_text(text: str, language: str | None = None) -> str:
+    spoken = (text or "").strip()
+    if not spoken:
+        return ""
+    max_chars = min(max(160, ANSWER_VOICE_MAX_CHARS), _COMPACT_VOICE_MAX_CHARS)
+    if len(spoken) <= max_chars:
+        return spoken
+    if language == "zh":
+        cut = spoken[:max_chars]
+        for idx in range(len(cut) - 1, max(0, max_chars // 2), -1):
+            if cut[idx] in "。！？；，、":
+                return cut[: idx + 1].strip()
+        return cut.rstrip("，；、,;: ") + "。"
+    sentences = [chunk.strip() for chunk in _SENTENCE_BOUNDARY_RE.split(spoken) if chunk.strip()]
+    out: list[str] = []
+    total = 0
+    for sentence in sentences:
+        added = len(sentence) + (1 if out else 0)
+        if total + added > max_chars:
+            break
+        out.append(sentence)
+        total += added
+    if out:
+        return " ".join(out).strip()
     return spoken[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:") + "."
 
 
@@ -510,56 +497,32 @@ def normalize_tagged_answer(text: str) -> str:
     if not text:
         return wrap_answer_for_voice_and_chat("I do not have enough information to answer that accurately.")
 
+    text = re.sub(r"\[\[followups\]\].*?(?:\[\[/followups\]\]|$)", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
     if "[[spoken]]" not in text:
         text = f"[[spoken]]{text}"
     if "[[details]]" in text and "[[/spoken]]" not in text.split("[[details]]", 1)[0]:
         text = text.replace("[[details]]", "[[/spoken]][[details]]", 1)
-    if "[[followups]]" in text and "[[/details]]" not in text.split("[[followups]]", 1)[0]:
-        text = text.replace("[[followups]]", "[[/details]][[followups]]", 1)
 
     if "[[details]]" not in text:
         if "[[/spoken]]" not in text:
             text += "[[/spoken]]"
         text += "[[details]][[/details]]"
     elif "[[/details]]" not in text.split("[[details]]", 1)[1]:
-        if "[[followups]]" in text:
-            text = text.replace("[[followups]]", "[[/details]][[followups]]", 1)
-        else:
-            text += "[[/details]]"
-
-    if "[[followups]]" not in text:
-        text += "[[followups]][[/followups]]"
-    elif "[[/followups]]" not in text.split("[[followups]]", 1)[1]:
-        text += "[[/followups]]"
+        text += "[[/details]]"
 
     return text
 
 
 async def normalize_spoken_for_tts(raw_spoken: str, language: str, *, trim_for_latency: bool = True) -> str:
-    spoken = prepare_tts_text(raw_spoken, language, SONIOX_TTS_CONTEXT_FILE)
+    raw_text = raw_spoken or ""
+    if trim_for_latency:
+        raw_text = _trim_spoken_for_latency(raw_text, language)
+    spoken = prepare_tts_text(raw_text, language)
     if not spoken:
         spoken = remove_repeated_sentences(sanitize_spoken_text(raw_spoken))
     if trim_for_latency:
         return _trim_spoken_for_latency(spoken, language)
     return spoken
-
-
-def _json_to_markdown_followups(value: object) -> str:
-    if not value:
-        return ""
-    if isinstance(value, (str, bytes)):
-        text = (value.decode() if isinstance(value, bytes) else value).strip()
-        if not text:
-            return ""
-        return "\n".join(f"- {line.strip().lstrip('- ').strip()}" for line in text.splitlines() if line.strip())
-    if not isinstance(value, (list, tuple)):
-        return ""
-    lines: list[str] = []
-    for item in value:
-        text = str(item).strip()
-        if text:
-            lines.append(f"- {text}")
-    return "\n".join(lines)
 
 
 def json_to_markdown_details(value: object) -> str:
@@ -596,92 +559,50 @@ def json_to_markdown_details(value: object) -> str:
     return "\n".join(line for line in lines if line).strip()
 
 
-def _json_payload_to_tagged_answer(payload: dict) -> str:
-    details = json_to_markdown_details(payload.get("details"))
-    spoken = "" if details else str(payload.get("spoken", "")).strip()
-    followups = _json_to_markdown_followups(payload.get("followups") or payload.get("follow_up_questions"))
-    if not followups:
-        followups = "- See details for next steps."
-    return rebuild_blocks(spoken=spoken, details=details or spoken, followups=followups)
-
-
-async def tagged_answer_with_full_details_voice(
-    tagged_answer: str,
-    contract_payload: dict | None,
-    language: str,
-) -> tuple[str, str]:
-    tagged_answer = normalize_tagged_answer(tagged_answer)
-    _, details_block, followups_block = extract_blocks(tagged_answer)
-    contract_details_voice = ""
-    if contract_payload:
-        contract_details_voice = json_to_markdown_details(contract_payload.get("details"))
-    details_voice = limit_text_for_answer_voice(contract_details_voice or details_block, language)
-    if not details_voice:
-        spoken_block, _, _ = extract_blocks(tagged_answer)
-        details_voice = limit_text_for_answer_voice(spoken_block, language)
-    spoken_voice = await normalize_spoken_for_tts(details_voice, language, trim_for_latency=False)
-    if not is_speakable_text(spoken_voice):
-        spoken_voice = await normalize_spoken_for_tts(
-            str(contract_payload.get("spoken", "")) if contract_payload else "",
-            language,
-            trim_for_latency=False,
-        )
-    if not is_speakable_text(spoken_voice):
-        spoken_voice = {
-            "ru": "Извините, я не могу корректно озвучить этот ответ. Повторите вопрос, пожалуйста.",
-            "kk": "Кешіріңіз, бұл жауапты дұрыс дыбыстай алмадым. Сұрағыңызды қайталап айтыңыз.",
-            "zh": "抱歉，我这次没有正确生成语音回答。请再说一遍您的问题。",
-        }.get(language, "Sorry, I could not generate a clean spoken answer this time. Please ask again.")
-    return rebuild_blocks(spoken_voice, details_voice, followups_block), spoken_voice
-
-
-def extract_answer_from_json(raw: str) -> str | None:
-    payload = _extract_json_payload(raw) or _extract_json_from_wrapped(raw)
-    if not isinstance(payload, dict):
-        return None
-    return _json_payload_to_tagged_answer(payload)
-
-
-def normalize_followup_questions(value: object) -> list[str]:
-    if not value:
-        return []
-    if isinstance(value, (str, bytes)):
-        raw = (value.decode() if isinstance(value, bytes) else value).strip()
-        if not raw:
-            return []
-        return [line.strip(" -\t") for line in raw.splitlines() if line.strip()]
-    if not isinstance(value, (list, tuple)):
-        return []
-    out: list[str] = []
-    for item in value:
-        text = str(item).strip()
-        if text:
-            out.append(text)
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for item in out:
-        key = re.sub(r"\s+", " ", item.lower()).strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        deduped.append(item)
-    return deduped
+def voice_text_from_details(value: object, language: str | None = None) -> str:
+    if not isinstance(value, dict):
+        return limit_text_for_answer_voice(json_to_markdown_details(value), language)
+    lines: list[str] = []
+    summary = str(value.get("summary", "")).strip()
+    if summary:
+        lines.append(summary)
+    points = value.get("points")
+    if isinstance(points, list):
+        for item in points:
+            text = str(item).strip()
+            if text and text not in lines:
+                lines.append(text)
+            if len(lines) >= 2:
+                break
+    if len(lines) < 2:
+        for section in value.get("sections", []):
+            if not isinstance(section, dict):
+                continue
+            text = str(section.get("text", "")).strip()
+            if text and text not in lines:
+                lines.append(text)
+            items = section.get("items")
+            if isinstance(items, list):
+                for item in items:
+                    item_text = str(item).strip()
+                    if item_text and item_text not in lines:
+                        lines.append(item_text)
+                    if len(lines) >= 2:
+                        break
+            if len(lines) >= 2:
+                break
+    return _compact_voice_text(" ".join(lines).strip(), language)
 
 
 def coerce_prompt_contract_payload(payload: dict, interrupted_input: bool, language: str) -> tuple[dict, list[str], list[str]]:
     if not isinstance(payload, dict):
         payload = {}
-    spoken = str(payload.get("spoken", "")).strip()
     details_payload = payload.get("details")
-    followups: list[str] = normalize_followup_questions(payload.get("followups"))
-    if not followups and "follow_up_questions" in payload:
-        followups = normalize_followup_questions(payload.get("follow_up_questions"))
-    details = _enforce_prompt_details(details_payload, len(followups))
-    details_voice = json_to_markdown_details(details)
+    details = _enforce_prompt_details(details_payload, 0)
+    details_voice = voice_text_from_details(details, language)
+    spoken = ""
     if details_voice:
-        spoken = prepare_tts_text(details_voice, language, SONIOX_TTS_CONTEXT_FILE)
-    elif spoken:
-        spoken = prepare_tts_text(spoken, language, SONIOX_TTS_CONTEXT_FILE)
+        spoken = _trim_spoken_for_latency(prepare_tts_text(details_voice, language), language)
     if not details["summary"]:
         details["summary"] = spoken[:220]
     if not spoken and not details["summary"]:
@@ -696,10 +617,6 @@ def coerce_prompt_contract_payload(payload: dict, interrupted_input: bool, langu
             "zh": "我不够确定，请您更简要地重新表达一次。",
         }
         details["summary"] = f"{details['summary']} {follow_up_guidance.get(language, follow_up_guidance['en'])}".strip()
-        if not followups:
-            followups = _default_followups(language)
-
-    followups = followups[:3]
     control = build_control_payload(payload, interrupted_input)
     if control.get("handoff_greeting") and spoken:
         control["handoff_greeting"] = False
@@ -709,14 +626,14 @@ def coerce_prompt_contract_payload(payload: dict, interrupted_input: bool, langu
         "details": details,
         "control": control,
         "tts_chunks": [],
-        "follow_up_questions": followups,
+        "follow_up_questions": [],
         "answer_contract": {
             "summary": details.get("summary", ""),
             "points": details.get("points", []),
             "sections": details.get("sections", []),
             "answer_kind": details.get("answer_kind", "direct"),
             "confidence": details.get("confidence", 0.86),
-            "requires_follow_up": bool(followups),
+            "requires_follow_up": False,
             "citations": details.get("citations", []),
             "notes": details.get("notes", []),
         },
@@ -725,4 +642,4 @@ def coerce_prompt_contract_payload(payload: dict, interrupted_input: bool, langu
     if language and language in {"en", "ru", "kk", "zh"}:
         normalized["details"]["language"] = language
 
-    return normalized, details.get("sections", []), followups
+    return normalized, details.get("sections", []), []
