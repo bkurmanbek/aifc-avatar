@@ -13,13 +13,9 @@ User speech -> STT -> frontend transcript -> LLM streaming -> sentence TTS -> Sy
 | Path | Role |
 |---|---|
 | `backend/` | Canonical backend package and live realtime pipeline |
-| `ws_backend/` | Thin compatibility shim for old entrypoints |
 | `frontend/` | Local Vite frontend copy matching the production UI |
 | `rag/` | Local RAG helpers for this prototype |
 | `scripts/` | Single-stack launcher, stop script, and smoke tests |
-| `logs/` | Reset-on-restart module logs |
-| `archive/` | Old generated/runtime/scratch artifacts moved out of the root |
-| `docs/` | Architecture, logging, and protocol notes |
 | `../data/` | Shared corpus, chunks, caches, vector DB, and voice refs |
 | `.env` | Local prototype environment |
 
@@ -58,7 +54,7 @@ bash scripts/run_ws_backend.sh
 `scripts/run_ws_backend.sh` uses
 `/home/admin-aifc/miniforge3/envs/synctalk2d/bin/python` by default. Override
 with `WS_BACKEND_PYTHON=/path/to/python` if a dedicated `.venv` is recreated.
-The canonical backend app is `backend.app.main:app`.
+The canonical backend app is `backend.main:app`.
 
 Frontend only:
 
@@ -77,15 +73,9 @@ python scripts/smoke_ws_interrupt.py
 python scripts/capture_ws_tts.py --text Hello --out rec_1.wav
 ```
 
-See also:
-
-- `docs/ARCHITECTURE.md`
-- `docs/WEBSOCKET_PROTOCOL.md`
-- `docs/LOGGING.md`
-
 The UI source, public assets, and frontend config are local to this workspace.
-Generated frontend output, runtime logs, recordings, pid files, and old demo
-experiments are ignored or moved to `archive/`.
+Generated frontend output, dependency installs, runtime logs, recordings, pid
+files, and cache folders are ignored and can be regenerated.
 
 ## Canonical Production Stack
 

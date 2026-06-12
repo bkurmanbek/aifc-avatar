@@ -1,3 +1,5 @@
+import type { SupportedLanguage } from './types'
+
 export function uid(): string {
   return Math.random().toString(36).slice(2)
 }
@@ -8,14 +10,6 @@ export function stripSpeechHints(text: string): string {
   return text.replace(KK_HINT_RE, '$1')
 }
 
-export function dotClass(mode: string): string {
-  if (mode === 'listening') return 'dot lst'
-  if (mode === 'thinking') return 'dot thk'
-  if (mode === 'rendering') return 'dot rnd'
-  if (mode === 'speaking') return 'dot spk'
-  return 'dot on'
-}
-
 export function encodeBase64(bytes: Uint8Array): string {
   const CHUNK_SIZE = 0x2000
   let binary = ''
@@ -23,4 +17,12 @@ export function encodeBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK_SIZE))
   }
   return btoa(binary)
+}
+
+export function detectUiLanguage(text: string): SupportedLanguage {
+  const lower = text.toLowerCase()
+  if (/[\u4e00-\u9fff]/.test(lower)) return 'zh'
+  if (/[әғқңөұүһі]/.test(lower) || /(сәлем|рахмет|рақмет|қалай|жоқ|иә|жұмыс|құжат)/.test(lower)) return 'kk'
+  if (/[а-яё]/.test(lower)) return 'ru'
+  return 'en'
 }

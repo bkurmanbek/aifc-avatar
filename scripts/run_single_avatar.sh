@@ -30,7 +30,7 @@ AVATAR_LABEL="${VITE_AVATAR_LABEL:-$AVATAR_NAME}"
 PIDS=()
 NAMES=()
 
-"$WS_BACKEND_PYTHON_BIN" -m backend.tools.reset_logs
+"$WS_BACKEND_PYTHON_BIN" -m backend.reset_logs
 
 kill_tree() {
   local pid="$1"
@@ -135,7 +135,7 @@ start_backend() {
       FIRST_TTS_CHARS="${FIRST_TTS_CHARS:-48}" \
       MIN_TTS_CHARS="${MIN_TTS_CHARS:-80}" \
       MAX_TTS_CHARS="${MAX_TTS_CHARS:-220}" \
-      "$WS_BACKEND_PYTHON_BIN" -m uvicorn backend.app.main:app --host "$WS_BACKEND_HOST" --port "$BACKEND_PORT"
+      "$WS_BACKEND_PYTHON_BIN" -m uvicorn backend.main:app --host "$WS_BACKEND_HOST" --port "$BACKEND_PORT"
   ) >"$log_file" 2>&1 &
 
   PIDS+=("$!")

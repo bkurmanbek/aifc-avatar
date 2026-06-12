@@ -33,7 +33,7 @@ def _load(index_path: Path = FAISS_INDEX_PATH, metadata_path: Path = FAISS_METAD
             return _INDEX, _METADATA
         if not index_path.exists() or not metadata_path.exists():
             raise RuntimeError(
-                f"FAISS index is missing. Build it with: python -m scripts.processing.build_faiss_index "
+                f"FAISS index is missing. Build it with: python -m scripts.build_faiss_index "
                 f"(expected {index_path} and {metadata_path})"
             )
         faiss = _faiss()

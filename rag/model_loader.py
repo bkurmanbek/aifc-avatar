@@ -5,7 +5,7 @@ from typing import Any
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from scripts.processing.reindex import BGEM3FlagModel
+from scripts.reindex import BGEM3FlagModel
 
 from .settings import EMBEDDING_MODEL_PATH, RERANKER_MODEL_PATH
 

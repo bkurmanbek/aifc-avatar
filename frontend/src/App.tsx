@@ -1,8 +1,7 @@
 
 import { useState, useEffect, useRef, useCallback, useReducer } from 'react'
-import type { ReactNode } from 'react'
-import type { WsInbound, UiMode, StructuredAnswer } from './types'
-import { encodeBase64 } from './utils'
+import type { WsInbound, UiMode } from './types'
+import { detectUiLanguage, encodeBase64 } from './utils'
 import { MicVAD, utils as vadUtils } from '@ricky0123/vad-web'
 import type { RealTimeVADOptions } from '@ricky0123/vad-web'
 import { IDLE_TIMEOUT_MS, VAD_SILENCE_LEVEL, AUTO_ENDPOINT_MS, MIN_RECORD_MS, VAD_INTERVAL_MS } from './constants'
@@ -11,33 +10,15 @@ import { useWebSocket } from './hooks/useWebSocket'
 import { useChunkPlayback } from './hooks/useChunkPlayback'
 import { useIdleTimer } from './hooks/useIdleTimer'
 import { writeClientLog, type ClientLogLevel } from './services/clientLogger'
+import { formatStructuredAnswer } from './services/formatStructuredAnswer'
 import { AvatarStage } from './components/AvatarStage'
 import { ChatPanel } from './components/ChatPanel'
 import { FloatingChatComposer } from './components/FloatingChatComposer'
+import { SidebarCard } from './components/SidebarCard'
 import { StatusBar } from './components/StatusBar'
-import { ThemeToggle } from './components/StatusIndicator'
+import { ThemeToggle } from './components/ThemeToggle'
 import { conversationReducer, initialConversationState } from './state/conversationReducer'
 import './styles.css'
-
-function detectUiLanguage(text: string): 'en' | 'ru' | 'kk' | 'zh' {
-  const lower = text.toLowerCase()
-  if (/[\u4e00-\u9fff]/.test(lower)) return 'zh'
-  if (/[әғқңөұүһі]/.test(lower) || /(сәлем|рахмет|рақмет|қалай|жоқ|иә|жұмыс|құжат)/.test(lower)) return 'kk'
-  if (/[а-яё]/.test(lower)) return 'ru'
-  return 'en'
-}
-
-function SidebarCard({ title, children, className = '' }: { title: string; children: ReactNode; className?: string }) {
-  return (
-    <aside className={`sidebar-card ${className}`} aria-label={title}>
-      <div className="sidebar-card-hdr">
-        <span>{title}</span>
-        <span className="panel-dot" aria-hidden="true" />
-      </div>
-      <div className="sidebar-card-body">{children}</div>
-    </aside>
-  )
-}
 
 type ActiveVadState = 'inactive' | 'initializing' | 'monitoring' | 'recording' | 'processing' | 'paused'
 
@@ -120,33 +101,6 @@ export default function App() {
 
   const appendAssistantText = useCallback((text: string) => {
     dispatchConversation({ type: 'response_chunk', text })
-  }, [])
-
-  const formatStructuredDetails = useCallback((answer: StructuredAnswer) => {
-    const blocks: string[] = []
-    const seen = new Set<string>()
-    const pushBlock = (raw: string) => {
-      const value = raw.trim()
-      if (!value) return
-      const key = value.replace(/\s+/g, ' ').trim().toLowerCase()
-      if (seen.has(key)) return
-      seen.add(key)
-      blocks.push(value)
-    }
-    const summary = answer.details.summary?.trim()
-    if (summary) pushBlock(summary)
-    for (const section of answer.details.sections) {
-      const title = section.title?.trim()
-      const text = section.text?.trim()
-      const items = (section.items ?? []).map((item) => item.trim()).filter(Boolean)
-      const sectionParts: string[] = []
-      const hasBody = Boolean(text && text !== summary) || items.length > 0
-      if (title && title.toLowerCase() !== 'details' && hasBody) sectionParts.push(`### ${title}`)
-      if (items.length > 0) sectionParts.push(items.map((item) => `- ${item}`).join('\n'))
-      if (text && text !== summary) sectionParts.push(text)
-      if (sectionParts.length > 0) pushBlock(sectionParts.join('\n'))
-    }
-    return blocks.join('\n\n').trim() || answer.spoken
   }, [])
 
   const sendTextPayload = useCallback((text: string) => {
@@ -262,7 +216,7 @@ export default function App() {
             dispatchConversation({
               type: 'answer_payload',
               answer: nextAnswer,
-              formattedText: formatStructuredDetails(nextAnswer),
+              formattedText: formatStructuredAnswer(nextAnswer),
             })
           }
           setShowChat(true)
