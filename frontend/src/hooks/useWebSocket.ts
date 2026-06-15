@@ -205,9 +205,15 @@ export function useWebSocket(handlers: WsHandlers) {
   }, [connect])
 
   useEffect(() => {
-    connect(primaryWsUrl)
+    // Defer by one macrotask so React StrictMode's synchronous unmount-cleanup
+    // cancels this timer before it fires, preventing a double connection that
+    // would cause the intro to start on a socket that immediately disconnects.
+    const connectTimer = window.setTimeout(() => {
+      connect(primaryWsUrl)
+    }, 0)
 
     return () => {
+      window.clearTimeout(connectTimer)
       clearReconnectTimer()
       const ws = wsRef.current
       wsRef.current = null
