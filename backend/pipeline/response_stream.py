@@ -17,6 +17,7 @@ from ..settings import (
 )
 from ..media.audio_utils import pcm_to_wav_bytes
 from ..api.ws_writer import ClientClosedError
+from ..utils.debug_io import save_tts_chunk as _save_tts_chunk_debug
 
 log = logging.getLogger(__name__)
 
@@ -215,6 +216,8 @@ class ResponseStream:
         self._media_chunk_idx += 1
         self._chunk_count = max(self._chunk_count, media_idx + 1)
 
+        sentence_text = " | ".join(s for s, _, _ in sentence_batch if s)
+
         async def prepared_texts():
             for sentence, _, _ in sentence_batch:
                 if sentence:
@@ -251,12 +254,9 @@ class ResponseStream:
                     )
                 buffer.extend(pcm)
             if buffer:
-                await self._queue_pcm_segment(
-                    _pad_pcm_tail(bytes(buffer), min_tail_bytes),
-                    sample_rate,
-                    source_idx,
-                    media_idx=media_idx,
-                )
+                padded = _pad_pcm_tail(bytes(buffer), min_tail_bytes)
+                _save_tts_chunk_debug(self._turn_id or "", media_idx, sentence_text, padded, sample_rate)
+                await self._queue_pcm_segment(padded, sample_rate, source_idx, media_idx=media_idx)
             else:
                 await self._send_media_error(media_idx, "TTS returned no audio")
             log_event(

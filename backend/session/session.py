@@ -66,6 +66,7 @@ from ..intro import (
 )
 from ..pipeline.response_stream import ResponseStream
 from ..startup import log_background_task_error as _log_background_task_error
+from ..utils.debug_io import save_response as _save_response_debug
 from .metrics import TurnMetrics
 
 log = logging.getLogger(__name__)
@@ -871,6 +872,7 @@ class ClientSession:
                 trim_for_latency=True,
             )
             chat = str(answer_payload.get("chat") or spoken).strip() or spoken
+            _save_response_debug(turn_id, spoken, chat)
             await stream.emit_spoken_text(spoken)
             if chat:
                 await stream.emit_chat_text(chat)

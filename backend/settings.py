@@ -136,6 +136,8 @@ MAX_TTS_CHARS = env_int("MAX_TTS_CHARS", 220)
 SHORT_SENTENCE_CHARS = env_int("SHORT_SENTENCE_CHARS", 40)
 MAX_HISTORY_TURNS = env_int("MAX_HISTORY_TURNS", 6)
 
+DEBUG_RESPONSE_DIR = os.getenv("DEBUG_RESPONSE_DIR", "").strip()
+
 SYSTEM_PROMPT = """You are an AIFC talking avatar.
 Answer only from the retrieved context and the short conversation history.
 If the retrieved context does not contain the answer, say that clearly.
