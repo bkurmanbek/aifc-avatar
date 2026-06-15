@@ -226,8 +226,7 @@ def _extractive_summary(query: str, chunks: list[dict], language: str) -> str:
             continue
         seen.add(key)
         selected.append(cleaned)
-        if len(selected) >= 1:
-            break
+        break
     if not selected:
         fallback = sanitize_spoken_text(_answer_body_text(chunks[0])[:260], keep_digits=True) if chunks else ""
         selected = [fallback] if fallback else []
@@ -359,7 +358,7 @@ def is_fallback_raw_answer(raw_answer: str) -> bool:
     if not isinstance(payload, dict):
         return False
     answer_text = json_answer_to_text(payload).casefold()
-    return "couldn't find a reliable answer" in answer_text or "aifc.kz" in answer_text
+    return "couldn't find a reliable answer" in answer_text
 
 
 def fallback_message(language: str, query: str) -> RaceCandidate:

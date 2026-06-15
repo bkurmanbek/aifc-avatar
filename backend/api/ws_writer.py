@@ -56,7 +56,7 @@ class WsWriter:
                 self._log_send("ws_send", data)
                 if self._on_send is not None:
                     self._on_send(data)
-            except (WebSocketDisconnect, RuntimeError) as exc:
+            except Exception as exc:
                 self._closed = True
                 self._log_send("ws_send_failed", data, exc=exc)
                 raise ClientClosedError() from exc
@@ -92,7 +92,6 @@ def _summarize_payload(data: dict) -> dict:
     summary: dict[str, object] = {"message_type": message_type}
     for key in (
         "turn_id",
-        "session_id",
         "chunk",
         "source_chunk",
         "frame_count",

@@ -129,7 +129,8 @@ class SonioxRealtimeSession:
         log_event(log, "stt_ws_started", session_id=self._session_id, latency_ms=(perf_counter() - started) * 1000)
 
     async def _listen(self) -> None:
-        assert self._ws is not None
+        if self._ws is None:
+            return
         try:
             async for raw in self._ws:
                 message = json.loads(raw)
@@ -317,21 +318,6 @@ class SonioxRealtimeSession:
             await asyncio.wait_for(self._commit_event.wait(), timeout=max(0.0, timeout_s))
         except asyncio.TimeoutError:
             pass
-        return self._joined_committed(), normalize_lang(self._language)
-
-    async def wait_committed_with_keepalive(self, timeout_s: float, interval_s: float = 0.5) -> tuple[str, str]:
-        timeout_s = max(0.0, timeout_s)
-        interval_s = max(0.1, interval_s)
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_s
-        while not self._commit_event.is_set():
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                break
-            try:
-                await asyncio.wait_for(self._commit_event.wait(), timeout=min(interval_s, remaining))
-            except asyncio.TimeoutError:
-                await self.send_keepalive()
         return self._joined_committed(), normalize_lang(self._language)
 
     async def finalize(

@@ -78,9 +78,11 @@ _DUP_QUERY_WINDOW_S = 1.5
 def _summarize_client_payload(payload: dict) -> dict:
     message_type = payload.get("type")
     summary: dict[str, object] = {"message_type": message_type}
-    for key in ("turn_id", "chunk", "source", "level"):
+    for key in ("turn_id", "chunk", "source"):
         if key in payload:
             summary[key] = payload.get(key)
+    if "level" in payload:
+        summary["client_level"] = payload.get("level")
     text = payload.get("text")
     if isinstance(text, str):
         summary["text_chars"] = len(text)
@@ -629,12 +631,9 @@ class ClientSession:
                 if not active_session.claim_finalization():
                     log_event(log, "audio_end_ignored", session_id=self.session_id, reason="duplicate_finalization")
                     return
-                text, language = await active_session.wait_committed_with_keepalive(
-                    SONIOX_STT_ENDPOINT_WAIT_S,
-                    interval_s=0.5,
-                )
+                text, language = await active_session.wait_committed(SONIOX_STT_ENDPOINT_WAIT_S)
                 if not text:
-                    await active_session.send_silence(200)
+                    await active_session.send_silence(300)
                     text, language = await active_session.finalize(close_after=False)
                 if not active_session.closed:
                     active_session.reset_utterance_state()
@@ -713,6 +712,7 @@ class ClientSession:
         if pipeline_active:
             await self.interrupt(send_event=True)
         self._reset_interrupt_state()
+        self.barge_in_triggered = False
         log_event(
             log,
             "transcript_final_accepted",
@@ -744,6 +744,7 @@ class ClientSession:
 
         interrupted_input = self.pipeline_task is not None and not self.pipeline_task.done()
         self._reset_interrupt_state()
+        self.barge_in_triggered = False
         if interrupted_input:
             await self.interrupt(send_event=True)
 
@@ -936,15 +937,21 @@ class ClientSession:
         except asyncio.CancelledError:
             if stream is not None:
                 await stream.cancel_all()
+            if self.history and self.history[-1] == {"role": "user", "content": query}:
+                self.history.pop()
             raise
         except ClientClosedError:
             if stream is not None:
                 await stream.cancel_all()
+            if self.history and self.history[-1] == {"role": "user", "content": query}:
+                self.history.pop()
         except Exception as exc:
             log.exception("query pipeline failed")
             log_event(log, "pipeline_failed", session_id=self.session_id, request_id=turn_id, level=logging.ERROR, error=exc)
             if stream is not None:
                 await stream.cancel_all()
+            if self.history and self.history[-1] == {"role": "user", "content": query}:
+                self.history.pop()
             await self.writer.send({"type": "error", "text": "Response generation failed", "turn_id": turn_id})
         finally:
             self.pipeline_task = None

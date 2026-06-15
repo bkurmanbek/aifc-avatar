@@ -166,8 +166,8 @@ _BARGE_QUERY_TERMS = {
     "тіркеу", "лицензия", "баға", "төлем", "мерзім", "процесс", "қадам",
     "көмек", "сұрақ", "қайтала", "қайталаңыз",
 }
-_MIN_INTERRUPTING_ALPHA_WORDS = 2
-_MIN_INTERRUPTING_ALPHA_CHARS = 10
+_MIN_INTERRUPTING_ALPHA_WORDS = 3
+_MIN_INTERRUPTING_ALPHA_CHARS = 14
 _ZH_BARGE_QUERY_TERMS = (
     "什么", "怎么", "如何", "为什么", "什么时候", "哪里", "哪个", "请问",
     "解释", "告诉", "申请", "文件", "要求", "许可证", "签证", "金融科技",
@@ -354,10 +354,9 @@ def is_interrupt_candidate(text: str, avg_logprob: float | None = None) -> bool:
     if len(alpha_words) < _MIN_INTERRUPTING_ALPHA_WORDS:
         return bool(alpha_words and alpha_words[0] in _BARGE_SINGLE_WORDS)
 
-    if len(alpha_words) >= _MIN_INTERRUPTING_ALPHA_WORDS:
-        letter_count = sum(len(word) for word in alpha_words)
-        if letter_count >= _MIN_INTERRUPTING_ALPHA_CHARS and not any(word in _NOISE_WORDS for word in alpha_words):
-            return True
+    letter_count = sum(len(word) for word in alpha_words)
+    if letter_count >= _MIN_INTERRUPTING_ALPHA_CHARS and not any(word in _NOISE_WORDS for word in alpha_words):
+        return True
     if any(term in normalized for term in _ZH_BARGE_QUERY_TERMS):
         return True
     return False

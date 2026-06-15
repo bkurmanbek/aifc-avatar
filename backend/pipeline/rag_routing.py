@@ -16,6 +16,20 @@ _INTERNAL_STRONG_PHRASES = (
     "employee benefits",
     "human resources",
     "sick leave",
+    "annual leave",
+    "leave policy",
+    "leave request",
+    "salary scale",
+    "salary band",
+    "salary grade",
+    "expense claim",
+    "expense report",
+    "expense policy",
+    "vendor invoice",
+    "vendor management",
+    "vendor registration",
+    "private network",
+    "private key",
     "access request",
     "service desk",
     "help desk",
@@ -29,11 +43,14 @@ _INTERNAL_STRONG_PHRASES = (
     "еңбек демалысы",
     "қызметкер саясаты",
 )
+# Keep only unambiguous single tokens — words that cannot appear in public AIFC queries.
+# Ambiguous words (leave, salary, benefits, private, expense, invoice, vendor) are moved
+# to multi-word phrases in _INTERNAL_STRONG_PHRASES above to avoid false positives.
 _INTERNAL_QUERY_STEMS = {
-    "internal", "employee", "staff", "hr", "payroll", "salary", "salaries", "leave",
-    "vacation", "timesheet", "intranet", "onboarding", "offboarding", "procurement",
-    "confidential", "private", "benefits", "expense", "reimbursement", "invoice",
-    "vendor", "nda", "helpdesk", "jira", "confluence", "sharepoint", "vpn",
+    "internal", "employee", "staff", "hr", "payroll",
+    "timesheet", "intranet", "onboarding", "offboarding", "procurement",
+    "confidential", "reimbursement",
+    "helpdesk", "jira", "confluence", "sharepoint", "vpn", "nda",
     "внутрен", "сотрудник", "персонал", "кадр", "зарплат", "оклад", "отпуск",
     "больнич", "табел", "интранет", "закуп", "служеб", "конфиденц",
     "ішкі", "қызметкер", "персонал", "кадр", "жалақы", "демалыс", "құпия",
@@ -58,7 +75,8 @@ def is_internal_query(query: str) -> bool:
     tokens = _tokens(query)
     if tokens & _INTERNAL_QUERY_STEMS:
         return True
-    return any(stem in normalized for stem in _INTERNAL_QUERY_STEMS if len(stem) >= 5)
+    # Substring match only for non-ASCII stems (Cyrillic/Kazakh roots that inflect beyond exact token match)
+    return any(stem in normalized for stem in _INTERNAL_QUERY_STEMS if len(stem) >= 5 and not stem.isascii())
 
 
 def select_rag_tool(query: str) -> str:
