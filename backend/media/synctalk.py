@@ -8,7 +8,7 @@ from collections.abc import AsyncGenerator
 
 import httpx
 
-from .settings import SYNCTALK_FRAME_TIMEOUT_S, SYNCTALK_STREAM_URL, SYNCTALK_TIMEOUT_S
+from ..settings import SYNCTALK_FRAME_TIMEOUT_S, SYNCTALK_STREAM_URL, SYNCTALK_TIMEOUT_S
 
 log = logging.getLogger(__name__)
 

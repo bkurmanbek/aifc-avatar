@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import websockets
 
-from .settings import (
+from ..settings import (
     SONIOX_TTS_API_KEY,
     SONIOX_TTS_AUDIO_FORMAT,
     SONIOX_TTS_BITRATE,
@@ -29,7 +29,8 @@ from .settings import (
     SONIOX_TTS_WS_URL,
 )
 from .audio_utils import pcm_to_wav_bytes, silent_wav_bytes
-from .tts_pronunciation import prepare_tts_text
+from ..logging_config import log_event, preview_text
+from ..utils.tts_pronunciation import prepare_tts_text
 
 log = logging.getLogger(__name__)
 
@@ -42,9 +43,10 @@ class SonioxRealtimeTTS:
     messages to the request that owns the stream_id.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, session_id: str | None = None) -> None:
         self.sample_rate = SONIOX_TTS_SAMPLE_RATE
         self.audio_format = SONIOX_TTS_AUDIO_FORMAT
+        self._session_id = session_id
         self._ws = None
         self._connect_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
@@ -52,6 +54,9 @@ class SonioxRealtimeTTS:
         self._keepalive_task: asyncio.Task | None = None
         self._queues: dict[str, asyncio.Queue[dict]] = {}
         self._closed = False
+
+    def set_session_id(self, session_id: str) -> None:
+        self._session_id = session_id
 
     @property
     def is_pcm_s16le(self) -> bool:
@@ -73,6 +78,7 @@ class SonioxRealtimeTTS:
         lang: str | None = None,
         priority: int | None = None,
         voice: str | None = None,
+        client_reference_id: str | None = None,
         expand_context_terms: bool = False,
     ) -> bytes:
         del priority
@@ -81,7 +87,13 @@ class SonioxRealtimeTTS:
         if not text:
             return silent_wav_bytes(self.sample_rate)
         pcm = bytearray()
-        async for chunk in self.synthesize_pcm_stream(text, language=language, voice=voice, expand_context_terms=False):
+        async for chunk in self.synthesize_pcm_stream(
+            text,
+            language=language,
+            voice=voice,
+            client_reference_id=client_reference_id,
+            expand_context_terms=False,
+        ):
             pcm.extend(chunk)
         return pcm_to_wav_bytes(bytes(pcm), self.sample_rate)
 
@@ -116,6 +128,15 @@ class SonioxRealtimeTTS:
                 voice=voice,
                 client_reference_id=client_reference_id,
                 queue=queue,
+            )
+            log_event(
+                log,
+                "tts_text_send",
+                session_id=self._session_id,
+                request_id=client_reference_id,
+                stream_id=stream_id,
+                chars=len(text),
+                text_preview=preview_text(text, 240),
             )
             await self._send({"stream_id": stream_id, "text": text, "text_end": True})
 
@@ -176,7 +197,7 @@ class SonioxRealtimeTTS:
                 client_reference_id=client_reference_id,
                 queue=queue,
             )
-            send_task = asyncio.create_task(self._send_text_stream(stream_id, prepared_texts()))
+            send_task = asyncio.create_task(self._send_text_stream(stream_id, prepared_texts(), request_id=client_reference_id))
             send_task.add_done_callback(lambda task: self._relay_send_task_error(task, queue))
 
             while True:
@@ -238,15 +259,30 @@ class SonioxRealtimeTTS:
         last_error: Exception | None = None
         for attempt in range(2):
             try:
+                reused_ws = _ws_is_open(self._ws)
                 await self._ensure_ws()
-                await self._send(
-                    self._config_message(
-                        stream_id,
-                        language=language,
-                        voice=voice,
-                        client_reference_id=client_reference_id,
-                    )
+                config = self._config_message(
+                    stream_id,
+                    language=language,
+                    voice=voice,
+                    client_reference_id=client_reference_id,
                 )
+                log_event(
+                    log,
+                    "tts_config_send",
+                    session_id=self._session_id,
+                    request_id=client_reference_id,
+                    stream_id=stream_id,
+                    attempt=attempt + 1,
+                    websocket_reused=reused_ws,
+                    model=config.get("model"),
+                    language=config.get("language"),
+                    voice=config.get("voice"),
+                    audio_format=config.get("audio_format"),
+                    sample_rate=config.get("sample_rate"),
+                    bitrate=config.get("bitrate"),
+                )
+                await self._send(config)
                 return
             except Exception as exc:
                 last_error = exc
@@ -259,12 +295,21 @@ class SonioxRealtimeTTS:
         if last_error is not None:
             raise last_error
 
-    async def _send_text_stream(self, stream_id: str, texts: AsyncIterable[str]) -> None:
+    async def _send_text_stream(self, stream_id: str, texts: AsyncIterable[str], *, request_id: str | None) -> None:
         try:
             async for text in texts:
                 clean = str(text or "").strip()
                 if not clean:
                     continue
+                log_event(
+                    log,
+                    "tts_text_chunk_send",
+                    session_id=self._session_id,
+                    request_id=request_id,
+                    stream_id=stream_id,
+                    chars=len(clean),
+                    text_preview=preview_text(clean, 240),
+                )
                 await self._send({"stream_id": stream_id, "text": clean, "text_end": False})
         finally:
             await self._send_if_open({"stream_id": stream_id, "text": "", "text_end": True})

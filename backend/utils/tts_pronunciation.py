@@ -14,12 +14,6 @@ def prepare_tts_text(
     *,
     expand_context_terms: bool = False,
 ) -> str:
-    """Normalize text for speech synthesis.
-
-    Keep acronyms in the text by default. Soniox receives the domain context on
-    the STT side and the TTS voice is faster when it speaks short acronyms
-    instead of expanded legal names.
-    """
     del expand_context_terms
     speech_lang = _speech_lang(language)
     prepared = text or ""

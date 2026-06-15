@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import shutil
 import sys
 import traceback
@@ -75,11 +76,11 @@ def configure_logging(*, reset: bool = False) -> None:
 
     module_filters: dict[str, tuple[str, ...]] = {
         "stt": ("backend.stt",),
-        "llm": ("backend.llm", "backend.answer_race"),
+        "llm": ("backend.llm", "backend.answer_race", "backend.answer_sources", "backend.answer_common"),
         "tts": ("backend.soniox_tts",),
         "avatar": ("backend.synctalk",),
         "pipeline": ("backend.main", "backend.response_stream", "backend.answer_format", "backend.intro", "backend.startup"),
-        "websocket": ("backend.ws_writer", "backend.client"),
+        "websocket": ("backend.ws_writer", "backend.websocket", "backend.client"),
     }
     for module, prefixes in module_filters.items():
         handler = _file_handler(LOG_FILES[module], formatter)
@@ -95,6 +96,26 @@ def _file_handler(filename: str, formatter: logging.Formatter) -> logging.FileHa
     handler = logging.FileHandler(path, encoding="utf-8")
     handler.setFormatter(formatter)
     return handler
+
+
+def preview_text(value: object, limit: int = 240) -> str:
+    text = str(value or "").replace("\r", " ").replace("\n", "\\n").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _field_text(value: Any) -> str:
+    if isinstance(value, (dict, list, tuple)):
+        text = json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
+    else:
+        text = str(value)
+    text = text.replace("\r", " ").replace("\n", "\\n")
+    if not text:
+        return '""'
+    if any(char.isspace() for char in text) or "=" in text:
+        return json.dumps(text, ensure_ascii=False)
+    return text
 
 
 def log_event(
@@ -118,8 +139,7 @@ def log_event(
     for key, value in fields.items():
         if value is None:
             continue
-        text = str(value).replace("\n", "\\n")
-        parts.append(f"{key}={text}")
+        parts.append(f"{key}={_field_text(value)}")
     if error is not None:
         parts.append(f"error={type(error).__name__}: {error}")
         parts.append("stack=" + "".join(traceback.format_exception(error)).replace("\n", "\\n"))

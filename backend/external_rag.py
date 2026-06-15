@@ -4,10 +4,12 @@ import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass, field
+from time import perf_counter
 
 import httpx
 
-from .rag_routing import EXTERNAL_INTERNAL_RAG_TOOL
+from .logging_config import log_event, preview_text
+from .pipeline.rag_routing import EXTERNAL_INTERNAL_RAG_TOOL
 from .settings import (
     EXTERNAL_RAG_API_KEY,
     EXTERNAL_RAG_AUTH_HEADER,
@@ -98,6 +100,21 @@ async def query_external_rag(
         "limit": config.limit,
         "topN": config.top_n,
     }
+    started = perf_counter()
+    log_event(
+        log,
+        "external_rag_request",
+        endpoint=config.url,
+        query_chars=len(query),
+        query_preview=preview_text(query, 240),
+        language=language,
+        history_items=len(request_payload["history"]),
+        memory_keys=",".join(sorted(str(key) for key in (conversation_memory or {}).keys())),
+        hybrid=config.hybrid,
+        with_rerank=config.with_rerank,
+        limit=config.limit,
+        top_n=config.top_n,
+    )
     try:
         timeout = httpx.Timeout(config.timeout_s, connect=min(10.0, config.timeout_s))
         client = await _external_rag_client()
@@ -112,11 +129,36 @@ async def query_external_rag(
             payload: object = response.json()
         except ValueError:
             payload = response.text
-    except Exception:
+    except Exception as exc:
         log.exception("external RAG request failed")
+        log_event(
+            log,
+            "external_rag_failed",
+            latency_ms=(perf_counter() - started) * 1000,
+            endpoint=config.url,
+            query_preview=preview_text(query, 240),
+            error=exc,
+            level=logging.ERROR,
+        )
         return ExternalRagResult(error="request_failed")
 
-    return normalize_external_rag_payload(payload, config=config)
+    result = normalize_external_rag_payload(payload, config=config)
+    log_event(
+        log,
+        "external_rag_response",
+        latency_ms=(perf_counter() - started) * 1000,
+        endpoint=config.url,
+        status_code=response.status_code,
+        answer_chars=len(result.answer),
+        answer_preview=preview_text(result.answer, 320),
+        chunks=len(result.chunks),
+        citations=len(result.citations),
+        confidence=result.confidence,
+        score=result.score,
+        prompt_contract=result.is_prompt_contract,
+        payload_type=type(payload).__name__,
+    )
+    return result
 
 
 def _client_lock() -> asyncio.Lock:
@@ -195,7 +237,7 @@ def _string_field(value: object) -> str:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return str(value)
     if isinstance(value, dict):
-        for key in ("answer", "spoken", "response", "text", "content", "summary"):
+        for key in ("chat", "spoken", "answer", "response", "text", "content", "summary"):
             text = _string_field(value.get(key))
             if text:
                 return text
@@ -207,7 +249,7 @@ def _answer_text(payload: object) -> str:
         return payload.strip()
     if not isinstance(payload, dict):
         return ""
-    for key in ("answer", "spoken", "response", "text", "content", "summary"):
+    for key in ("chat", "spoken", "answer", "response", "text", "content", "summary"):
         text = _string_field(payload.get(key))
         if text:
             return text
@@ -382,4 +424,4 @@ def _confidence_from_score(score: float, config: ExternalRagConfig) -> str:
 
 
 def _is_prompt_contract(payload: object) -> bool:
-    return isinstance(payload, dict) and "details" in payload
+    return isinstance(payload, dict) and ("spoken" in payload or "chat" in payload)

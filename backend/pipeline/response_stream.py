@@ -4,14 +4,12 @@ import asyncio
 import base64
 import contextlib
 import logging
-import re
 from time import perf_counter
 from uuid import uuid4
 
-from backend.logging_config import log_event
-
-from .spoken_text import sanitize_spoken_text
-from .settings import (
+from ..logging_config import log_event, preview_text
+from ..utils.spoken_text import sanitize_spoken_text
+from ..settings import (
     AVATAR_TTS_FIRST_SEGMENT_MS,
     AVATAR_TTS_MAX_SEGMENT_MS,
     AVATAR_TTS_MIN_SEGMENT_MS,
@@ -22,8 +20,8 @@ from .settings import (
     SONIOX_TTS_SEGMENT_MS,
     SYNCTALK_MAX_CONCURRENCY,
 )
-from .audio_utils import pcm_to_wav_bytes
-from .ws_writer import ClientClosedError
+from ..media.audio_utils import pcm_to_wav_bytes
+from ..api.ws_writer import ClientClosedError
 
 log = logging.getLogger(__name__)
 
@@ -32,18 +30,8 @@ _SENTENCE_BATCH_WAIT_S = 0.06
 _AVATAR_WORKER_COUNT = 1
 _SYNCTALK_SEMAPHORE: asyncio.Semaphore | None = None
 
-_TAG_RE = re.compile(r"\[\[(/?)(spoken|details)\]\]", re.IGNORECASE)
-_SECTION_TITLE_RE = re.compile(r"^#{1,6}\s+(.+)$")
-
 
 class ResponseStream:
-    """Local WebSocket response streamer.
-
-    This class intentionally mirrors the small public surface that the backend
-    uses from the old production stream class, while keeping all runtime logic
-    inside this demo workspace.
-    """
-
     def __init__(
         self,
         writer,
@@ -68,8 +56,6 @@ class ResponseStream:
         self._query_text = query_text
         self._chunks = chunks or []
         self._tts_voice = tts_voice
-        self._buffer = ""
-        self._section: str | None = None
         self._chunk_tasks: list[asyncio.Task] = []
         self._chunk_count = 0
         self._streaming_media = bool(getattr(tts, "supports_streaming_avatar", False))
@@ -81,8 +67,7 @@ class ResponseStream:
         self._media_closed = False
         self._first_spoken_chunk_recorded = False
         self.spoken_text = ""
-        self.details_text = ""
-        self.full_reply = ""
+        self.chat_text = ""
 
     @property
     def chunk_count(self) -> int:
@@ -103,14 +88,7 @@ class ResponseStream:
         value = getattr(self._plan, "answer_language", None)
         return str(value) if value else None
 
-    async def feed(self, text: str) -> None:
-        if not text:
-            return
-        self._buffer += text
-        await self._drain_pending(final=False)
-
     async def flush(self) -> None:
-        await self._drain_pending(final=True)
         lang = self._get_lang()
         for sentence, idx in self._splitter.flush():
             await self._emit_spoken_sentence(sentence)
@@ -119,41 +97,13 @@ class ResponseStream:
     async def emit_spoken_text(self, text: str) -> None:
         await self._emit_spoken_incremental(text)
 
-    async def emit_details_text(self, text: str) -> None:
-        await self._emit_details_incremental(text)
-
-    async def _drain_pending(self, *, final: bool) -> None:
-        while self._buffer:
-            match = _TAG_RE.search(self._buffer)
-            if match is None:
-                if not final and "[[" in self._buffer[-16:]:
-                    return
-                text = self._buffer
-                self._buffer = ""
-                await self._emit_section_text(text)
-                return
-
-            before = self._buffer[: match.start()]
-            if before:
-                await self._emit_section_text(before)
-            closing, section = match.group(1), match.group(2).lower()
-            self._buffer = self._buffer[match.end() :]
-            self._section = None if closing else section
-
-    async def _emit_section_text(self, text: str) -> None:
-        if not text:
-            return
-        section = self._section or "spoken"
-        if section == "spoken":
-            await self._emit_spoken_incremental(text)
-        elif section == "details":
-            await self._emit_details_incremental(text)
+    async def emit_chat_text(self, text: str) -> None:
+        await self._emit_chat_incremental(text)
 
     async def _emit_spoken_incremental(self, text: str) -> None:
         if not text:
             return
         self.spoken_text += text
-        self.full_reply += text
         lang = self._get_lang()
         for sentence, idx in self._splitter.feed(text):
             await self._emit_spoken_sentence(sentence)
@@ -164,12 +114,18 @@ class ResponseStream:
         if not cleaned:
             return
 
-    async def _emit_details_incremental(self, text: str) -> None:
+    async def _emit_chat_incremental(self, text: str) -> None:
         if not text:
             return
-        self.details_text += text
-        self.full_reply += text
+        self.chat_text += text
         if text.strip():
+            log_event(
+                log,
+                "chat_chunk_emit",
+                request_id=self._turn_id,
+                chars=len(text),
+                text_preview=preview_text(text, 240),
+            )
             await self._writer.send(self._event({"type": "response_chunk", "text": text}))
 
     def _schedule_spoken_chunk(self, sentence: str, idx: int, lang: str | None) -> None:
@@ -178,6 +134,15 @@ class ResponseStream:
             return
         self._ensure_media_worker()
         if self._media_queue is not None:
+            log_event(
+                log,
+                "spoken_chunk_queued",
+                request_id=self._turn_id,
+                source_chunk=idx,
+                language=lang,
+                chars=len(cleaned),
+                text_preview=preview_text(cleaned, 240),
+            )
             self._media_queue.put_nowait((cleaned, idx, lang))
 
     def _ensure_media_worker(self) -> None:
@@ -238,7 +203,13 @@ class ResponseStream:
         started = perf_counter()
         try:
             log_event(log, "tts_chunk_start", request_id=self._turn_id, chunk=idx, streaming=False, chars=len(text))
-            audio_wav = await self._tts.synthesize(text, lang=lang, priority=0 if idx == 0 else 1, voice=self._tts_voice)
+            audio_wav = await self._tts.synthesize(
+                text,
+                lang=lang,
+                priority=0 if idx == 0 else 1,
+                voice=self._tts_voice,
+                client_reference_id=self._turn_id,
+            )
             log_event(
                 log,
                 "tts_chunk_done",
@@ -287,7 +258,12 @@ class ResponseStream:
                 chars=sum(len(sentence) for sentence, _, _ in sentence_batch),
             )
             first_segment = True
-            async for pcm in self._tts.synthesize_pcm_stream_from_texts(prepared_texts(), lang=batch_lang, voice=self._tts_voice):
+            async for pcm in self._tts.synthesize_pcm_stream_from_texts(
+                prepared_texts(),
+                lang=batch_lang,
+                voice=self._tts_voice,
+                client_reference_id=self._turn_id,
+            ):
                 if not pcm:
                     continue
                 if not first_audio_logged:
@@ -432,79 +408,13 @@ class ResponseStream:
         except Exception as exc:
             log.exception("response media chunk failed: chunk=%s", idx)
             await self._send_media_error(idx, f"media chunk failed: {exc}")
-        finally:
-            pass
-
-    def _detail_summary(self) -> str:
-        details = sanitize_spoken_text(self.details_text, keep_digits=True)
-        spoken = sanitize_spoken_text(self.spoken_text, keep_digits=True)
-        if details:
-            return details.splitlines()[0][:500].strip()
-        return spoken[:500].strip()
-
-    def _detail_sections(self) -> list[dict]:
-        details = (self.details_text or "").strip()
-        if not details:
-            spoken = sanitize_spoken_text(self.spoken_text, keep_digits=True)
-            return [{"id": "spoken", "title": "Answer", "text": spoken, "items": []}] if spoken else []
-
-        sections: list[dict] = []
-        current = {"id": "details-1", "title": "Details", "text": "", "items": []}
-        for raw_line in details.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            title_match = _SECTION_TITLE_RE.match(line)
-            if title_match:
-                if current["text"] or current["items"]:
-                    sections.append(current)
-                current = {
-                    "id": f"details-{len(sections) + 1}",
-                    "title": title_match.group(1).strip(),
-                    "text": "",
-                    "items": [],
-                }
-                continue
-            if line.startswith("-"):
-                current["items"].append(line.lstrip("- ").strip())
-            else:
-                current["text"] = f"{current['text']} {line}".strip()
-        if current["text"] or current["items"]:
-            sections.append(current)
-        return sections
 
     def build_answer_payload(self) -> dict:
         spoken = sanitize_spoken_text(self.spoken_text, keep_digits=True)
-        summary = self._detail_summary()
-        sections = self._detail_sections()
-        key_points: list[dict] = []
-        for index, section in enumerate(sections[:4]):
-            preview = section.get("text") or " ".join(section.get("items") or [])
-            preview = str(preview).strip()
-            if preview:
-                key_points.append(
-                    {
-                        "id": f"point-{index + 1}",
-                        "label": f"Point {index + 1}",
-                        "preview": preview[:180],
-                        "section_index": index,
-                    }
-                )
         return {
             "answer_id": uuid4().hex,
             "spoken": spoken,
-            "details": {
-                "summary": summary or spoken,
-                "points": [spoken] if spoken else [],
-                "sections": sections,
-                "answer_kind": "direct",
-                "confidence": 0.86,
-                "requires_follow_up": False,
-                "citations": [],
-                "notes": [],
-            },
-            "key_points": key_points,
-            "follow_up_questions": [],
+            "chat": self.chat_text.strip() or spoken,
         }
 
     async def wait_all(self) -> None:

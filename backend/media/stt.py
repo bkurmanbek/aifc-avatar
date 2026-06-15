@@ -2,26 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import io
 import json
 import logging
-import wave
 from collections.abc import Awaitable, Callable
+from time import perf_counter
 from typing import Any
 
 import websockets
 
-from .language import (
+from ..utils.language import (
     is_noise_utterance,
     normalize_lang,
     supported_lang_or_none,
     transcript_has_meaningful_speech,
     is_interrupt_candidate,
 )
-from .settings import (
+from ..settings import (
     SONIOX_API_KEY,
     SONIOX_STT_AUDIO_FORMAT,
-    SONIOX_STT_BATCH_FINALIZE_TIMEOUT_S,
     SONIOX_STT_CONTEXT_MAX_CHARS,
     SONIOX_STT_ENABLE_ENDPOINT_DETECTION,
     SONIOX_STT_LANGUAGE_HINTS,
@@ -33,7 +31,8 @@ from .settings import (
     SONIOX_STT_SAMPLE_RATE,
     SONIOX_STT_WS_URL,
 )
-from .ws_writer import ClientClosedError, WsWriter
+from ..logging_config import log_event, preview_text
+from ..api.ws_writer import ClientClosedError, WsWriter
 
 log = logging.getLogger(__name__)
 
@@ -45,69 +44,6 @@ SONIOX_STT_CONTEXT: dict[str, Any] = {
             "value": "AIFC Authority, AFSA, AIX, AIFC Expat Centre, IAC, AIFC Green Finance Centre, Carbon Platform, FinTech Lab",
         },
     ],
-    "text": (
-        "Core AIFC entities:\n"
-        "AIFC = Astana International Financial Centre | Международный финансовый центр «Астана» | Астана Халықаралық Қаржы Орталығы | aliases: МФЦА, АХҚО\n"
-        "МФЦА = Astana International Financial Centre | Международный финансовый центр «Астана» | Астана Халықаралық Қаржы Орталығы | aliases: AIFC, АХҚО\n"
-        "АХҚО = Astana International Financial Centre | Международный финансовый центр «Астана» | Астана Халықаралық Қаржы Орталығы | aliases: AIFC, МФЦА\n"
-        "AFSA = Astana Financial Services Authority | Комитет МФЦА по регулированию финансовых услуг | АХҚО Қаржылық қызметтер көрсетуді реттеу жөніндегі комитеті | aliases: АФСА\n"
-        "AIFCA = AIFC Authority | Администрация МФЦА | АХҚО әкімшілігі\n"
-        "AIX = Astana International Exchange | Астанинская международная биржа | Астана Халықаралық Биржасы\n"
-        "AEC = AIFC Expat Centre | Экспат центр МФЦА | АХҚО Экспат орталығы\n"
-        "IAC = AIFC International Arbitration Centre | Международный арбитражный центр МФЦА | АХҚО Халықаралық Арбитраж Орталығы\n"
-        "\n"
-        "Financial and legal terms:\n"
-        "AML = Anti-Money Laundering | Противодействие отмыванию денег | Ақшаны жылыстатуға қарсы іс-қимыл | aliases: ПОД\n"
-        "CTF = Counter-Terrorism Financing | Противодействие финансированию терроризма | Терроризмді қаржыландыруға қарсы іс-қимыл | aliases: ПФТ\n"
-        "KYC = Know Your Customer | Знай своего клиента | Клиентті тану\n"
-        "IIN = Individual Identification Number | Индивидуальный идентификационный номер | Жеке сәйкестендіру нөмірі | aliases: ИИН, ЖСН\n"
-        "ИИН = Individual Identification Number | Индивидуальный идентификационный номер | Жеке сәйкестендіру нөмірі | aliases: IIN, ЖСН\n"
-        "EDS = Electronic Digital Signature | Электронная цифровая подпись | Электрондық цифрлық қолтаңба | aliases: ЭЦП, ЭЦҚ\n"
-        "JSC = Joint Stock Company | Акционерное общество | Акционерлік қоғам | aliases: АО, АҚ\n"
-        "TRP = Temporary Residence Permit | Разрешение на временное проживание | Уақытша тұруға рұқсат | aliases: РВП\n"
-        "PE = Private Equity | Прямые инвестиции / Частный капитал | Жеке меншік капитал\n"
-        "VAT = Value Added Tax | Налог на добавленную стоимость | Қосылған құн салығы | aliases: НДС, ҚҚС\n"
-        "CFC = Controlled Foreign Companies | Контролируемые иностранные компании | Бақыланатын шетелдік компания | aliases: КИК\n"
-        "MCI = Monthly Calculation Index | Месячный расчётный показатель | Айлық есептік көрсеткіш | aliases: МРП, АЕК\n"
-        "\n"
-        "Carbon markets and climate terms:\n"
-        "GFC = AIFC Green Finance Centre | Центр зеленых финансов МФЦА | АХҚО Жасыл қаржы орталығы | aliases: ЦЗФ, ЖҚО\n"
-        "VCM = Voluntary Carbon Market | Добровольный углеродный рынок | Ерікті көміртегі нарығы\n"
-        "ETS = Emissions Trading System | Система торговли выбросами | Шығарындылармен сауда жүйесі | aliases: СТВ, ШСЖ\n"
-        "СТВ = Emissions Trading System | Система торговли выбросами | Шығарындылармен сауда жүйесі | aliases: ETS, ШСЖ\n"
-        "GHG = Greenhouse Gas | Парниковый газ | Жылыжай газы | aliases: GHGs, ПГ\n"
-        "ПГ = Greenhouse Gas | Парниковые газы | Жылыжай газдары | aliases: GHG, GHGs\n"
-        "CO2 = Carbon Dioxide | Диоксид углерода / Углекислый газ | Көмірқышқыл газы | aliases: CO₂\n"
-        "VCS = Verified Carbon Standard | Верифицированный углеродный стандарт | Расталған көміртегі стандарты\n"
-        "REC = Renewable Energy Certificate / International Renewable Energy Certificate | Сертификат возобновляемой энергии | Жаңартылатын энергия сертификаты | aliases: I-REC, I-RECs, RECs, СВЭ\n"
-        "СВЭ = Renewable Energy Certificate / International Renewable Energy Certificate | Сертификат возобновляемой энергии | Жаңартылатын энергия сертификаты | aliases: REC, I-REC, I-RECs, RECs\n"
-        "ICAP = International Carbon Action Partnership | Международное партнёрство по углеродным действиям | Халықаралық көміртегі іс-шаралар серіктестігі\n"
-        "ICVCM = Integrity Council for the Voluntary Carbon Market | Совет честности добровольного углеродного рынка | Ерікті көміртегі нарығының тұтастық кеңесі\n"
-        "VCMI = Voluntary Carbon Markets Integrity Initiative | Инициатива честности добровольных углеродных рынков | Ерікті көміртегі нарықтары тұтастық бастамасы\n"
-        "CCP = Core Carbon Principles | Основные углеродные принципы | Негізгі көміртегі қағидаттары\n"
-        "CCB = Climate, Community and Biodiversity Standards | Стандарты климата, сообщества и биоразнообразия | Климат, қоғамдастық және биоалуантүрлілік стандарттары\n"
-        "REDD = Reducing Emissions from Deforestation and forest Degradation | Сокращение выбросов от обезлесения и деградации лесов | Ормансыздану мен деградациядан туындаған шығарындыларды азайту\n"
-        "CORSIA = Carbon Offsetting and Reduction Scheme for International Aviation | Схема компенсации и сокращения выбросов для международной авиации | Халықаралық авиациядағы көміртегі өтеу схемасы\n"
-        "ICAO = International Civil Aviation Organization | Международная организация гражданской авиации | Халықаралық азаматтық авиация ұйымы | aliases: ИКАО\n"
-        "ESG = Environmental, Social, and Governance | Экологические, социальные и управленческие критерии | Экологиялық, әлеуметтік және басқарушылық критерийлер\n"
-        "ICROA = International Carbon Reduction and Offset Alliance | Международный альянс по сокращению и компенсации выбросов углерода | Халықаралық көміртегін азайту және өтеу альянсы\n"
-        "IFM = Improved Forest Management | Улучшенное лесоуправление | Жетілдірілген орман шаруашылығы\n"
-        "NFE = Non-Financial Entity | Нефинансовая организация | Қаржылық емес ұйым\n"
-        "MW = Megawatt | Мегаватт | Мегаватт\n"
-        "\n"
-        "Capital markets and exchange terms:\n"
-        "EUA = EU Allowances | Квоты EU ETS | EU ETS квоталары\n"
-        "FEAS = Federation of Euro-Asian Stock Exchanges | Федерация евроазиатских фондовых бирж | Еуразиялық қор биржалары федерациясы\n"
-        "CIBAFI = General Council for Islamic Banks and Financial Institutions | Генеральный совет исламских банков и финансовых институтов | Ислам банктері мен қаржы институттарының бас кеңесі\n"
-        "\n"
-        "Currency and energy terms:\n"
-        "KZT = Kazakhstani Tenge | Казахстанский тенге | Қазақстандық теңге\n"
-        "USD = US Dollar | Доллар США | АҚШ доллары\n"
-        "ВИЭ = Renewable Energy Sources | Возобновляемые источники энергии | Жаңартылатын энергия көздері | aliases: RES, ЖЭК\n"
-        "\n"
-        "Role terms:\n"
-        "CEO = Chief Executive Officer | Генеральный директор | Бас директор"
-    ),
     "terms": [
         "AIFC", "МФЦА", "АХҚО", "AFSA", "AIFCA", "AIX", "AEC", "IAC", "GFC", "AML",
         "CTF", "KYC", "IIN", "ИИН", "EDS", "JSC", "TRP", "PE", "VAT", "CFC",
@@ -148,64 +84,24 @@ def looks_like_pcm16_chunk(data: bytes) -> bool:
     header = data[:12]
     if header.startswith(b"RIFF") or header.startswith(b"\x1a\x45\xdf\xa3") or header.startswith(b"ID3") or header.startswith(b"OggS"):
         return False
-    # All-zero chunks can occur during VAD pre-roll or short pauses and are still valid PCM.
-    # Rejecting them creates an ignore window that can drop the first real speech frames.
     return True
-
-
-def guess_extension(data: bytes) -> str:
-    if data.startswith(b"RIFF"):
-        return "wav"
-    if data.startswith(b"\x1a\x45\xdf\xa3"):
-        return "webm"
-    if data.startswith(b"OggS"):
-        return "ogg"
-    return "bin"
-
-
-class SonioxBatchSTT:
-    def __init__(self) -> None:
-        self._closed = False
-
-    async def transcribe(self, audio_bytes: bytes, language: str | None = None) -> tuple[str, str]:
-        audio_format, sample_rate, payload = _prepare_one_shot_audio(audio_bytes)
-        session = SonioxRealtimeSession(
-            writer=None,
-            batch_stt=None,
-            on_meaningful_partial=None,
-            preferred_language=language,
-            audio_format=audio_format,
-            sample_rate=sample_rate,
-        )
-        await session.start()
-        try:
-            chunk_size = _stream_chunk_size(sample_rate)
-            for offset in range(0, len(payload), chunk_size):
-                await session.send_audio(payload[offset : offset + chunk_size])
-                await asyncio.sleep(0.02)
-            return await session.finalize(timeout_s=SONIOX_STT_BATCH_FINALIZE_TIMEOUT_S)
-        finally:
-            await session.close()
-
-    async def close(self) -> None:
-        self._closed = True
 
 
 class SonioxRealtimeSession:
     def __init__(
         self,
         writer: WsWriter | None,
-        batch_stt: SonioxBatchSTT | None = None,
         on_meaningful_partial: RealtimePartialCallback | None = None,
         on_final_utterance: RealtimeFinalCallback | None = None,
         preferred_language: str | None = None,
         audio_format: str | None = None,
         sample_rate: int | None = None,
+        session_id: str | None = None,
     ):
         self._writer = writer
-        self._batch_stt = batch_stt
         self._on_meaningful_partial = on_meaningful_partial
         self._on_final_utterance = on_final_utterance
+        self._session_id = session_id
         self._ws = None
         self._listener: asyncio.Task | None = None
         self._committed: list[str] = []
@@ -219,13 +115,18 @@ class SonioxRealtimeSession:
         self._audio_format = audio_format or SONIOX_STT_AUDIO_FORMAT
         self._sample_rate = sample_rate or SONIOX_STT_SAMPLE_RATE
         self._audio_bytes_sent = 0
+        self._audio_chunks_sent = 0
 
     async def start(self) -> None:
         if not SONIOX_API_KEY:
             raise RuntimeError("SONIOX_API_KEY is not configured")
+        started = perf_counter()
         self._ws = await websockets.connect(SONIOX_STT_WS_URL, max_size=None)
-        await self._ws.send(json.dumps(_soniox_config(self._language, self._audio_format, self._sample_rate)))
+        config = _soniox_config(self._language, self._audio_format, self._sample_rate)
+        log_event(log, "stt_config_send", session_id=self._session_id, **_stt_config_summary(config))
+        await self._ws.send(json.dumps(config))
         self._listener = asyncio.create_task(self._listen())
+        log_event(log, "stt_ws_started", session_id=self._session_id, latency_ms=(perf_counter() - started) * 1000)
 
     async def _listen(self) -> None:
         assert self._ws is not None
@@ -234,6 +135,14 @@ class SonioxRealtimeSession:
                 message = json.loads(raw)
                 if message.get("error_type") or message.get("error_code") or message.get("error_message"):
                     log.warning("Soniox STT error: %s", message)
+                    log_event(
+                        log,
+                        "stt_provider_error",
+                        session_id=self._session_id,
+                        error_type=message.get("error_type"),
+                        error_code=message.get("error_code"),
+                        error_message=message.get("error_message"),
+                    )
                     self._closed = True
                     self._commit_event.set()
                     break
@@ -275,12 +184,31 @@ class SonioxRealtimeSession:
 
         partial_text = "".join(partial_parts).strip()
         if _valid_live_text(partial_text):
+            log_event(
+                log,
+                "stt_partial_received",
+                session_id=self._session_id,
+                language=normalize_lang(self._language),
+                chars=len(partial_text),
+                text_preview=preview_text(partial_text, 160),
+            )
             await self._send_partial(partial_text)
 
         if final_marker is not None:
             final_text = "".join(self._pending_final_tokens).strip()
             self._pending_final_tokens = []
             if _valid_committed_text(final_text):
+                log_event(
+                    log,
+                    "stt_final_received",
+                    session_id=self._session_id,
+                    marker=final_marker,
+                    language=normalize_lang(self._language),
+                    chars=len(final_text),
+                    audio_bytes=self._audio_bytes_sent,
+                    audio_chunks=self._audio_chunks_sent,
+                    text_preview=preview_text(final_text, 240),
+                )
                 appended = self._append_committed(final_text)
                 if (
                     appended
@@ -292,6 +220,15 @@ class SonioxRealtimeSession:
                         self._on_final_utterance(final_text, normalize_lang(self._language))
                     )
                     task.add_done_callback(_log_callback_error)
+            else:
+                log_event(
+                    log,
+                    "stt_final_ignored",
+                    session_id=self._session_id,
+                    marker=final_marker,
+                    chars=len(final_text),
+                    text_preview=preview_text(final_text, 160),
+                )
             self._commit_event.set()
 
     async def _send_partial(self, text: str) -> None:
@@ -316,6 +253,15 @@ class SonioxRealtimeSession:
             try:
                 await self._ws.send(chunk)
                 self._audio_bytes_sent += len(chunk)
+                self._audio_chunks_sent += 1
+                if self._audio_chunks_sent == 1 or self._audio_chunks_sent % 25 == 0:
+                    log_event(
+                        log,
+                        "stt_audio_sent",
+                        session_id=self._session_id,
+                        bytes_total=self._audio_bytes_sent,
+                        chunks=self._audio_chunks_sent,
+                    )
             except websockets.exceptions.ConnectionClosed:
                 self._closed = True
                 self._commit_event.set()
@@ -361,6 +307,7 @@ class SonioxRealtimeSession:
         self._commit_event.clear()
         self._finalization_claimed = False
         self._audio_bytes_sent = 0
+        self._audio_chunks_sent = 0
 
     def _joined_committed(self) -> str:
         return " ".join(part.strip() for part in self._committed if part.strip()).strip()
@@ -389,15 +336,20 @@ class SonioxRealtimeSession:
 
     async def finalize(
         self,
-        fallback_audio: bytes | None = None,
-        allow_fallback: bool = True,
         timeout_s: float | None = None,
         close_after: bool = True,
     ) -> tuple[str, str]:
         if self._closed:
-            if allow_fallback and fallback_audio is not None and self._batch_stt is not None:
-                return await self._batch_stt.transcribe(fallback_audio, language=self._language or None)
             return "", normalize_lang(self._language)
+        started = perf_counter()
+        log_event(
+            log,
+            "stt_finalize_send",
+            session_id=self._session_id,
+            audio_bytes=self._audio_bytes_sent,
+            audio_chunks=self._audio_chunks_sent,
+            close_after=close_after,
+        )
         if self._ws is not None:
             async with self._lock:
                 try:
@@ -414,11 +366,16 @@ class SonioxRealtimeSession:
         )
         if close_after:
             await self.close()
-        if text or fallback_audio is None or not allow_fallback:
-            return text, lang
-        if self._batch_stt is None:
-            return text, lang
-        return await self._batch_stt.transcribe(fallback_audio, language=lang or None)
+        log_event(
+            log,
+            "stt_finalize_done",
+            session_id=self._session_id,
+            latency_ms=(perf_counter() - started) * 1000,
+            language=lang,
+            chars=len(text),
+            text_preview=preview_text(text, 240),
+        )
+        return text, lang
 
     async def close(self) -> None:
         self._closed = True
@@ -433,7 +390,6 @@ class SonioxRealtimeSession:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._listener
             self._listener = None
-
 
     def _append_committed(self, text: str) -> bool:
         normalized = " ".join(text.lower().split())
@@ -450,19 +406,6 @@ class SonioxRealtimeSession:
     @property
     def has_audio(self) -> bool:
         return self._audio_bytes_sent > 0
-
-
-def _prepare_one_shot_audio(audio_bytes: bytes) -> tuple[str, int, bytes]:
-    if guess_extension(audio_bytes) == "wav":
-        try:
-            with wave.open(io.BytesIO(audio_bytes), "rb") as wav:
-                if wav.getnchannels() == 1 and wav.getsampwidth() == 2:
-                    return SONIOX_STT_AUDIO_FORMAT, wav.getframerate(), wav.readframes(wav.getnframes())
-        except wave.Error:
-            pass
-    if guess_extension(audio_bytes) != "bin":
-        return "auto", SONIOX_STT_SAMPLE_RATE, audio_bytes
-    return SONIOX_STT_AUDIO_FORMAT, SONIOX_STT_SAMPLE_RATE, audio_bytes
 
 
 def _stream_chunk_size(sample_rate: int) -> int:
@@ -494,6 +437,28 @@ def _soniox_config(
         config["num_channels"] = 1
     config["context"] = _fit_context_to_limit(config["context"])
     return config
+
+
+def _stt_config_summary(config: dict[str, Any]) -> dict[str, object]:
+    context = config.get("context") if isinstance(config.get("context"), dict) else {}
+    terms = context.get("terms") if isinstance(context, dict) else []
+    general = context.get("general") if isinstance(context, dict) else []
+    text = context.get("text") if isinstance(context, dict) else ""
+    hints = config.get("language_hints") or []
+    return {
+        "model": config.get("model"),
+        "audio_format": config.get("audio_format"),
+        "sample_rate": config.get("sample_rate"),
+        "num_channels": config.get("num_channels"),
+        "language_hints": ",".join(str(item) for item in hints),
+        "language_hints_strict": config.get("language_hints_strict"),
+        "endpoint_detection": config.get("enable_endpoint_detection"),
+        "max_endpoint_delay_ms": config.get("max_endpoint_delay_ms"),
+        "context_chars": _context_size_chars(context) if isinstance(context, dict) else 0,
+        "context_terms": len(terms) if isinstance(terms, list) else 0,
+        "context_general": len(general) if isinstance(general, list) else 0,
+        "context_text_chars": len(text) if isinstance(text, str) else 0,
+    }
 
 
 def _validate_soniox_context(context: dict[str, Any]) -> dict[str, Any]:

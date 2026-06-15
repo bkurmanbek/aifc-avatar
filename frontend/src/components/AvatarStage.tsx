@@ -12,8 +12,6 @@ interface AvatarStageProps {
   isListening: boolean
   isBusy: boolean
   showComposer: boolean
-  followUpQuestions: string[]
-  showFollowUps: boolean
   showTranscript: boolean
   fullscreenTargetRef: RefObject<HTMLDivElement | null>
   idleVideoRef: RefObject<HTMLVideoElement | null>
@@ -22,7 +20,6 @@ interface AvatarStageProps {
   onToggleMute: () => void
   onInterrupt: () => void
   onToggleComposer: () => void
-  onSelectFollowUp: (question: string) => void
 }
 
 export function AvatarStage({
@@ -60,17 +57,6 @@ export function AvatarStage({
             <span className="stage-avatar-label">{AVATAR_LABEL}</span>
           </div>
         )}
-        {/* Follow-up suggestions disabled
-        {!showComposer && !showTranscript && showFollowUps && followUpQuestions.length > 0 && (
-          <div className="stage-followup-strip" aria-label="Suggested follow-up questions">
-            {followUpQuestions.slice(0, 3).map((question) => (
-              <button key={question} className="stage-followup-card" type="button" onClick={() => onSelectFollowUp(question)}>
-                {question}
-              </button>
-            ))}
-          </div>
-        )}
-        */}
         <div className="video-control-dock" aria-label="Video controls">
           <button className={`video-ctrl ${showComposer ? 'active' : ''}`} type="button" onClick={onToggleComposer} aria-pressed={showComposer} aria-label={showComposer ? 'Hide text input' : 'Show text input'}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

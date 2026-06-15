@@ -27,4 +27,5 @@ rec_*.wav
 .env
 
 !logs/.gitkeep
+archive/*
 !archive/.gitkeep

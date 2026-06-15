@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from backend.settings import (
+from .settings import (
     INTRO_AVATAR_CACHE_KEY,
     INTRO_AUDIO_CACHE_DIR,
     INTRO_AUDIO_CACHE_PREBUILD,
@@ -17,8 +17,8 @@ from backend.settings import (
     SONIOX_TTS_INTRO_LANGUAGE,
     SONIOX_TTS_INTRO_VOICE,
 )
-from backend.soniox_tts import SonioxRealtimeTTS
-from backend.synctalk import SyncTalkClient
+from .media.tts import SonioxRealtimeTTS
+from .media.synctalk import SyncTalkClient
 
 log = logging.getLogger(__name__)
 

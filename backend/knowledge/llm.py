@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 import json
+import logging
 import os
+from time import perf_counter
 from typing import Any
 
 try:
@@ -15,9 +17,13 @@ except ImportError:
 else:
     legacy_genai = None
 
-from .language import language_name
-from .original_backend import _ANSWER_SYSTEM, _build_context, format_conversation_memory
-from .settings import GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL, GEMINI_TEMPERATURE, SYSTEM_PROMPT
+from ..utils.language import language_name
+from ..logging_config import log_event, preview_text
+from ..settings import GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL, GEMINI_TEMPERATURE, SYSTEM_PROMPT
+from .rag import _ANSWER_SYSTEM, _build_context
+from .memory import format_conversation_memory
+
+log = logging.getLogger(__name__)
 
 
 def _extract_json_payload(raw: str) -> dict[str, Any] | None:
@@ -61,9 +67,8 @@ def _fallback_instruction(language: str) -> str:
     }.get(language, "Sorry, I couldn't find a reliable answer in my knowledge base. Please visit aifc.kz.")
     return (
         "Fallback rule when the retrieved context does not reliably answer the question:\n"
-        f'- details.summary must be exactly or very close to: "{fallback}"\n'
-        f'- details.points must include: "{fallback}"\n'
-        "- details.answer_kind must be \"fallback\".\n"
+        f'- spoken must be exactly or very close to: "{fallback}"\n'
+        f'- chat must be exactly or very close to: "{fallback}"\n'
     )
 
 
@@ -76,7 +81,7 @@ def build_prompt(
     faq_seed: str = "",
     expert_mode: bool = False,
     needs_widget: bool = False,
-) -> str:
+) -> tuple[list[dict[str, str]], str]:
     history_msgs = [
         {"role": "user" if item["role"] == "user" else "assistant", "content": item["content"]}
         for item in history[-6:]
@@ -100,7 +105,7 @@ def build_prompt(
         if expert_mode
         else "Default mode: use clear professional wording.\n"
     )
-    widget_line = "Widget mode: keep the structured details easy to display.\n" if needs_widget else ""
+    widget_line = "Widget mode: keep chat markdown compact and easy to display.\n" if needs_widget else ""
     contract_section = _build_contract_section()
     fallback_rule = _fallback_instruction(language)
     prompt_user = (
@@ -121,46 +126,31 @@ def build_prompt(
         "- Include emails, phone numbers, named contact persons, physical addresses, schedules, office hours, or department contact blocks ONLY if the user explicitly asks for contact details, email, phone, address, schedule, office hours, or how to contact someone.\n"
         "- If the user asks broadly what you can help with, answer with service/topic categories only and omit all contact details.\n\n"
         f"{fallback_rule}\n"
-        "Return one valid JSON object only.\n"
-        "Allowed top-level keys:\n"
-        "- details (object; required, this is the full structured answer and the backend will voice it)\n"
-        "- control (object)\n"
-        "Forbidden top-level keys: spoken, tts_chunks, followups, follow_up_questions.\n"
-        "Do not add a separate spoken summary, TTS chunk list, or follow-up question list.\n\n"
-        "Details generation is required.\n"
-        "- Put the useful answer in details.\n"
-        "- Use details.summary for the direct answer.\n"
-        "- Use details.points for the most important facts, requirements, fees, thresholds, dates, contacts, and next steps that directly answer the user.\n"
-        "- Use details.sections for procedures, comparisons, multi-part answers, or long answers.\n"
-        "- Keep details bounded: at most five points and two short sections unless the user explicitly asks for exhaustive detail.\n"
-        "- Do not repeat the same idea across summary, points, and sections.\n"
-        "- Include only relevant supported details needed to answer the user's exact question.\n\n"
-        "Expected control schema:\n"
-        "{\n"
-        '  "interrupt_ack": false,\n'
-        '  "handoff_greeting": false\n'
-        "}\n\n"
-        "Rules for voice output:\n"
-        "- The backend derives voice output from details after generation.\n"
-        "- Do not create a separate short spoken summary, spoken field, or tts_chunks field.\n"
-        "- The first sentence is mandatory: compact, direct, standalone, and it must answer the user's exact question immediately.\n"
-        "- The first sentence must not start with background framing, caveats, or phrases like \"according to the context\".\n"
-        "- Write all numbers as words in details. Never use digits in details.\n"
-        "- In Chinese, use Chinese number characters for number words.\n"
-        "- Details must be concise, complete enough, and speakable.\n"
-        "- The first sentence must name the exact AIFC body, department, or service when the context provides it.\n"
-        "- The first sentence must include exact numbers, fees, thresholds, timeframes, or statistics that directly answer the question, written as words.\n"
-        "- For abbreviations in details, write the expansion or pronunciation text, not the bare abbreviation.\n"
-        "- For website domains, write the normal domain form such as aifc.kz. Never spell domains letter-by-letter.\n"
-        "- If the utterance is a noisy, empty, or malformed one, set details to {}.\n\n"
+        "Return one valid JSON object only with exactly these top-level keys:\n"
+        "- spoken (string; required): compact voice answer for TTS/avatar.\n"
+        "- chat (string; required): complete chat answer for the transcript UI.\n\n"
+        "Rules for spoken:\n"
+        "- One or two short sentences only.\n"
+        "- Answer the user's exact question immediately.\n"
+        "- Use plain speakable text, not markdown, bullets, JSON, citations, or source labels.\n"
+        "- Do not start with phrases like \"according to the context\" or \"based on the provided information\".\n"
+        "- Include the exact AIFC body, department, service, fee, threshold, date, or timeframe when it directly answers the question.\n"
+        "- Write numbers as words for TTS. In Chinese, use Chinese number characters.\n"
+        "- For abbreviations, use the expanded name or natural pronunciation text when it is clearer for speech.\n"
+        "- For domains, write the normal domain form such as aifc.kz.\n\n"
+        "Rules for chat:\n"
+        "- Provide the full detailed answer for the chat panel.\n"
+        "- Markdown is allowed: short paragraphs, bullets, and small headings are fine.\n"
+        "- Keep it focused on the user's exact question and retrieved facts.\n"
+        "- Do not repeat the same idea just to fill space.\n"
+        "- Include only supported facts from the retrieved context.\n"
+        "- If useful, include relevant names, requirements, steps, fees, thresholds, dates, contacts, and citations from the retrieved context.\n"
+        "- If the utterance is noisy, empty, or malformed, set both spoken and chat to the clear-question fallback in the user's language.\n\n"
         "Rules for multilingual website context:\n"
         "- Retrieved website or PDF context may be in English, Russian, Kazakh, or mixed languages.\n"
         "- Answer in the user's language and translate supported facts from retrieved context when needed.\n"
         "- Preserve official names, legal terms, and standard abbreviations accurately.\n"
         "- Do not generate follow-up questions.\n\n"
-        "Rules for control:\n"
-        "- interrupt_ack=true only when the input is a genuine new/interrupting query while answering.\n"
-        "- handoff_greeting may be true for first turn greetings.\n\n"
         "If no reliable answer is available from retrieved context, do not guess. Use the fallback rule.\n\n"
         f"Additional system guidance:\n{SYSTEM_PROMPT}\n\n"
         f"Persistent conversation memory:\n{memory_text}\n\n"
@@ -171,30 +161,63 @@ def build_prompt(
 
 
 async def stream_answer(history_msgs: list[dict[str, str]], prompt: str) -> AsyncIterator[str]:
-    if genai is not None and types is not None:
-        client = genai.Client()
-        config = types.GenerateContentConfig(
-            temperature=GEMINI_TEMPERATURE,
-            max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS,
-        )
-        async for chunk in await client.aio.models.generate_content_stream(
-            model=GEMINI_MODEL,
-            contents=[
-                {"role": "model", "parts": [{"text": _ANSWER_SYSTEM}]},
-                *[
-                    {"role": "user" if item["role"] == "user" else "model", "parts": [{"text": item["content"]}]}
-                    for item in history_msgs
+    started = perf_counter()
+    chunk_count = 0
+    output_chars = 0
+    provider = "google_genai" if genai is not None and types is not None else "google_generativeai_legacy"
+    log_event(
+        log,
+        "llm_stream_start",
+        provider=provider,
+        model=GEMINI_MODEL,
+        temperature=GEMINI_TEMPERATURE,
+        max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS,
+        history_items=len(history_msgs),
+        prompt_chars=len(prompt),
+        prompt_preview=preview_text(prompt, 500),
+    )
+    try:
+        if genai is not None and types is not None:
+            client = genai.Client()
+            config = types.GenerateContentConfig(
+                temperature=GEMINI_TEMPERATURE,
+                max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS,
+            )
+            async for chunk in await client.aio.models.generate_content_stream(
+                model=GEMINI_MODEL,
+                contents=[
+                    {"role": "model", "parts": [{"text": _ANSWER_SYSTEM}]},
+                    *[
+                        {"role": "user" if item["role"] == "user" else "model", "parts": [{"text": item["content"]}]}
+                        for item in history_msgs
+                    ],
+                    {"role": "user", "parts": [{"text": prompt}]},
                 ],
-                {"role": "user", "parts": [{"text": prompt}]},
-            ],
-            config=config,
-        ):
-            if chunk.text:
-                yield chunk.text
-        return
+                config=config,
+            ):
+                if chunk.text:
+                    chunk_count += 1
+                    output_chars += len(chunk.text)
+                    yield chunk.text
+            return
 
-    async for text in _stream_answer_legacy(history_msgs, prompt):
-        yield text
+        async for text in _stream_answer_legacy(history_msgs, prompt):
+            chunk_count += 1
+            output_chars += len(text)
+            yield text
+    except Exception as exc:
+        log_event(log, "llm_stream_failed", latency_ms=(perf_counter() - started) * 1000, error=exc, level=logging.ERROR)
+        raise
+    finally:
+        log_event(
+            log,
+            "llm_stream_done",
+            latency_ms=(perf_counter() - started) * 1000,
+            provider=provider,
+            model=GEMINI_MODEL,
+            chunks=chunk_count,
+            output_chars=output_chars,
+        )
 
 
 def _legacy_configure() -> None:

@@ -5,8 +5,6 @@ export type ConversationState = {
   messages: ChatMessage[]
   aiMessageId: string | null
   activeAnswer: StructuredAnswer | null
-  stageFollowUps: string[]
-  showStageFollowUps: boolean
   answerLanguage: SupportedLanguage
   activeSpokenChunk: number | null
   assistantStreamBuffer: string
@@ -22,15 +20,12 @@ export type ConversationAction =
   | { type: 'reset' }
   | { type: 'interrupted' }
   | { type: 'set_answer_language'; language: SupportedLanguage }
-  | { type: 'show_followups' }
   | { type: 'active_spoken_chunk'; chunk: number | null }
 
 export const initialConversationState: ConversationState = {
   messages: [],
   aiMessageId: null,
   activeAnswer: null,
-  stageFollowUps: [],
-  showStageFollowUps: false,
   answerLanguage: 'en',
   activeSpokenChunk: null,
   assistantStreamBuffer: '',
@@ -59,8 +54,6 @@ export function conversationReducer(
         ...state,
         aiMessageId: id,
         activeAnswer: null,
-        stageFollowUps: [],
-        showStageFollowUps: false,
         activeSpokenChunk: null,
         assistantStreamBuffer: '',
         answerPayloadReceived: false,
@@ -94,8 +87,6 @@ export function conversationReducer(
       return {
         ...state,
         activeAnswer: action.answer,
-        stageFollowUps: action.answer.follow_up_questions ?? [],
-        showStageFollowUps: false,
         answerPayloadReceived: true,
         assistantStreamBuffer: action.formattedText,
         messages: id
@@ -131,9 +122,6 @@ export function conversationReducer(
 
     case 'set_answer_language':
       return { ...state, answerLanguage: action.language }
-
-    case 'show_followups':
-      return { ...state, showStageFollowUps: state.stageFollowUps.length > 0 }
 
     case 'active_spoken_chunk':
       return { ...state, activeSpokenChunk: action.chunk }

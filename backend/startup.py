@@ -5,8 +5,8 @@ import contextlib
 import logging
 from time import perf_counter
 
-from backend.original_backend import fast_answer_plan_retrieve
-from backend.settings import (
+from .knowledge.rag import fast_answer_plan_retrieve
+from .settings import (
     LOCAL_RAG_PREWARM_QUERY,
     LOCAL_RAG_STARTUP_PREWARM,
 )

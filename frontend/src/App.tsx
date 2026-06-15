@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef, useCallback, useReducer } from 'react'
 import type { WsInbound, UiMode } from './types'
 import { detectUiLanguage, encodeBase64 } from './utils'
-import { MicVAD, utils as vadUtils } from '@ricky0123/vad-web'
+import { MicVAD } from '@ricky0123/vad-web'
 import type { RealTimeVADOptions } from '@ricky0123/vad-web'
 import { IDLE_TIMEOUT_MS, VAD_SILENCE_LEVEL, AUTO_ENDPOINT_MS, MIN_RECORD_MS, VAD_INTERVAL_MS } from './constants'
 import { activeListeningConfig } from './activeListeningConfig'
@@ -10,7 +10,6 @@ import { useWebSocket } from './hooks/useWebSocket'
 import { useChunkPlayback } from './hooks/useChunkPlayback'
 import { useIdleTimer } from './hooks/useIdleTimer'
 import { writeClientLog, type ClientLogLevel } from './services/clientLogger'
-import { formatStructuredAnswer } from './services/formatStructuredAnswer'
 import { AvatarStage } from './components/AvatarStage'
 import { ChatPanel } from './components/ChatPanel'
 import { FloatingChatComposer } from './components/FloatingChatComposer'
@@ -28,8 +27,6 @@ export default function App() {
   const [conversation, dispatchConversation] = useReducer(conversationReducer, initialConversationState)
   const messages = conversation.messages
   const aiMessageId = conversation.aiMessageId
-  const stageFollowUps = conversation.stageFollowUps
-  const showStageFollowUps = conversation.showStageFollowUps
   const [partialText, setPartialText] = useState('')
   const [inputText, setInputText] = useState('')
   const [isBusy, setIsBusy] = useState(false)
@@ -66,7 +63,6 @@ export default function App() {
   const isSocketOpenRef = useRef(false)
   const currentSessionIdRef = useRef<string | null>(null)
   const activeTurnIdRef = useRef<string | null>(null)
-  const stageFollowUpsRef = useRef<string[]>([])
   const showChatRef = useRef(false)
   const idleTimerRef = useRef<{ reset: () => void; clear: () => void }>({ reset: () => {}, clear: () => {} })
 
@@ -77,10 +73,6 @@ export default function App() {
     micEnabledRef.current = micEnabled
     sttReadyRef.current = sttReady
   }, [isBusy, isListening, activeListening, micEnabled, sttReady])
-
-  useEffect(() => {
-    stageFollowUpsRef.current = stageFollowUps
-  }, [stageFollowUps])
 
   // ── Helpers ───────────────────────────────────────────────────
   const log = useCallback((text: string, cls?: string) => {
@@ -207,16 +199,14 @@ export default function App() {
           if (isStaleTurn(msg.turn_id)) return
           {
             const nextAnswer = {
-            answer_id: msg.answer_id,
-            spoken: msg.spoken,
-            details: msg.details,
-            key_points: msg.key_points,
-            follow_up_questions: msg.follow_up_questions,
+              answer_id: msg.answer_id,
+              spoken: msg.spoken,
+              chat: msg.chat,
             }
             dispatchConversation({
               type: 'answer_payload',
               answer: nextAnswer,
-              formattedText: formatStructuredAnswer(nextAnswer),
+              formattedText: msg.chat || msg.spoken,
             })
           }
           setShowChat(true)
@@ -381,7 +371,6 @@ export default function App() {
       setMode('idle')
       setIsBusy(false)
       isBusyRef.current = false  // Sync so VAD onSpeechStart sees ready state immediately
-      if (stageFollowUpsRef.current.length > 0) dispatchConversation({ type: 'show_followups' })
       log('ready', 'ok')
     }, [log]),
     onFirstFrameRender: useCallback((chunk: number, turnId?: string) => {
@@ -439,7 +428,7 @@ export default function App() {
     let vadTimer: number | null = null
     let silenceMs = 0
     let listenStartedAt = 0
-    let manualAudioFrames: Float32Array[] = []
+    let manualAudioStarted = false
     let activeMode = false
     let activeVadState: ActiveVadState = 'inactive'
 
@@ -487,28 +476,15 @@ export default function App() {
       void audioNode?.close()
       audioNode = null
       analyser = null
-      manualAudioFrames = []
+      manualAudioStarted = false
       activeVadState = 'inactive'
       updateVAD(0)
     }
 
-    const sendVadAudio = async (audio: Float32Array) => {
-      if (!audio.length) return
+    const sendAudioEnd = () => {
       isBusyRef.current = true
       setIsBusy(true)
-      const wav = vadUtils.encodeWAV(audio, 1, 16000, 1, 16)
-      sendWsRef.current({ type: 'audio', data: encodeBase64(new Uint8Array(wav)) })
-    }
-
-    const mergeAudioFrames = (frames: Float32Array[]) => {
-      const totalLength = frames.reduce((sum, frame) => sum + frame.length, 0)
-      const merged = new Float32Array(totalLength)
-      let offset = 0
-      for (const frame of frames) {
-        merged.set(frame, offset)
-        offset += frame.length
-      }
-      return merged
+      sendWsRef.current({ type: 'audio_end' })
     }
 
     const encodePCM16 = (audio: Float32Array) => {
@@ -525,8 +501,6 @@ export default function App() {
       if (!isListeningRef.current) return
       isListeningRef.current = false
       setIsListening(false)
-      const framesToSend = manualAudioFrames.slice()
-      manualAudioFrames = []
       if (activeMode) {
         setActiveVadState('monitoring')
         setMode('idle')
@@ -535,8 +509,8 @@ export default function App() {
         return
       }
       const shouldSend = sendFinal
-      if (shouldSend && framesToSend.length) {
-        void sendVadAudio(mergeAudioFrames(framesToSend))
+      if (shouldSend && manualAudioStarted) {
+        sendAudioEnd()
         setMode('thinking')
         log('processing...')
       } else if (shouldSend) {
@@ -561,7 +535,7 @@ export default function App() {
 
     const beginRecording = () => {
       if (!micStream || isListeningRef.current || isBusyRef.current) return
-      manualAudioFrames = []
+      manualAudioStarted = false
       silenceMs = 0
       listenStartedAt = Date.now()
       setIsListening(true)
@@ -597,7 +571,7 @@ export default function App() {
         pcmProcessor.port.onmessage = (event: MessageEvent<ArrayBuffer>) => {
           if (!isListeningRef.current || activeMode) return
           const frame = new Float32Array(event.data)
-          manualAudioFrames.push(frame)
+          manualAudioStarted = true
           sendWsRef.current({ type: 'audio_chunk', data: encodeBase64(encodePCM16(frame)) })
         }
         micSource.connect(pcmProcessor)
@@ -700,23 +674,18 @@ export default function App() {
             }
             if (!isListeningRef.current && activeVadState !== 'monitoring') setActiveVadState('monitoring')
           },
-          onSpeechEnd: (audio) => {
+          onSpeechEnd: () => {
             if (!micEnabledRef.current) return
             isListeningRef.current = false
             setIsListening(false)
             if (isBusyRef.current || playbackRef.current.isPlayingRef.current) {
-              // During TTS playback: send the final audio to finalize the Soniox stream.
-              // The frontend VAD detects silence faster (400ms AUTO_ENDPOINT_MS) than
-              // Soniox's endpoint delay (500ms), so this path handles stop keyword
-              // detection via the "audio" handler directly — which is faster.
-              const wav = vadUtils.encodeWAV(audio, 1, 16000, 1, 16)
-              sendWsRef.current({ type: 'audio', data: encodeBase64(new Uint8Array(wav)) })
+              sendAudioEnd()
               return
             }
             setActiveVadState('processing')
             setMode('thinking')
             setPartialText('')
-            void sendVadAudio(audio)
+            sendAudioEnd()
           },
         } satisfies Partial<RealTimeVADOptions>)
         activeVad = vad
@@ -1053,8 +1022,6 @@ export default function App() {
                 isListening={isListening}
                 isBusy={isBusy}
                 showComposer={showComposer}
-                followUpQuestions={stageFollowUps}
-                showFollowUps={showStageFollowUps}
                 showTranscript={Boolean(isListening || partialText)}
                 onToggleMic={() => { void micRef.current.toggleMic() }}
                 onToggleMute={() => {
@@ -1068,7 +1035,6 @@ export default function App() {
                   setShowChat(true)
                   setShowComposer((v) => !v)
                 }}
-                onSelectFollowUp={(question) => submitPrompt(question)}
               />
 
               {/* stage-meta is always rendered so it reserves space and the stage never resizes.

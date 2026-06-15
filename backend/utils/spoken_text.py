@@ -3,8 +3,6 @@ from __future__ import annotations
 import re
 
 
-_SPOKEN_RE = re.compile(r"\[\[spoken\]\](.*?)\[\[/spoken\]\]", re.IGNORECASE | re.DOTALL)
-_DETAILS_RE = re.compile(r"\[\[details\]\](.*?)\[\[/details\]\]", re.IGNORECASE | re.DOTALL)
 _CONTROL_TAG_RE = re.compile(r"\[\[/?[a-z_]+\]\]|\[\[[^\]]+\]\]|<[^>]+>")
 _STAGE_DIR_RE = re.compile(r"\[(?:[A-Za-z][^\]]{0,40}|[А-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі][^\]]{0,40}|[\u4e00-\u9fff][^\]]{0,20})\]")
 _PARENS_DIR_RE = re.compile(r"\((?:laughs|giggles|whispers|sighs|pause|sarcastically|smiles?|breathes?)\)", re.IGNORECASE)
@@ -67,19 +65,6 @@ _AIFC_KZ_SPELLED_RE = re.compile(
     r"\bA\s*I\s*F\s*C\s*(?:dot|точка|нүкте|нүктесі|点)\s*K\s*Z\b",
     re.IGNORECASE,
 )
-
-
-def extract_blocks(tagged_text: str) -> tuple[str, str, str]:
-    spoken = _match_block(_SPOKEN_RE, tagged_text)
-    details = _match_block(_DETAILS_RE, tagged_text)
-    return spoken, details, ""
-
-
-def rebuild_blocks(spoken: str, details: str) -> str:
-    return (
-        f"[[spoken]]{spoken.strip()}[[/spoken]]"
-        f"[[details]]{details.strip()}[[/details]]"
-    )
 
 
 def sanitize_spoken_text(text: str, *, keep_digits: bool = False) -> str:
@@ -466,8 +451,3 @@ def normalize_spoken_numbers(text: str, lang: str) -> str:
     if not text:
         return ""
     return _replace_numbers(text, lang)
-
-
-def _match_block(pattern: re.Pattern[str], text: str) -> str:
-    match = pattern.search(text or "")
-    return (match.group(1) if match else "").strip()
