@@ -41,6 +41,7 @@ export type ChunkState = {
   frames: string[]
   frameDone: boolean
   frameStride: number
+  expectedFrames?: number
   cached?: boolean
   frameCacheLoading?: boolean
   error?: boolean

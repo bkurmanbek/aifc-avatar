@@ -296,6 +296,7 @@ class SonioxRealtimeTTS:
             raise last_error
 
     async def _send_text_stream(self, stream_id: str, texts: AsyncIterable[str], *, request_id: str | None) -> None:
+        completed = False
         try:
             async for text in texts:
                 clean = str(text or "").strip()
@@ -311,8 +312,10 @@ class SonioxRealtimeTTS:
                     text_preview=preview_text(clean, 240),
                 )
                 await self._send({"stream_id": stream_id, "text": clean, "text_end": False})
+            completed = True
         finally:
-            await self._send_if_open({"stream_id": stream_id, "text": "", "text_end": True})
+            if completed:
+                await self._send_if_open({"stream_id": stream_id, "text": "", "text_end": True})
 
     def _relay_send_task_error(self, task: asyncio.Task, queue: asyncio.Queue[dict]) -> None:
         with contextlib.suppress(asyncio.CancelledError):

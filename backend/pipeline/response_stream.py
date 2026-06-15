@@ -3,21 +3,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import io
 import logging
+import wave
 from time import perf_counter
 from uuid import uuid4
 
 from ..logging_config import log_event, preview_text
 from ..utils.spoken_text import sanitize_spoken_text
 from ..settings import (
-    AVATAR_TTS_FIRST_SEGMENT_MS,
-    AVATAR_TTS_MAX_SEGMENT_MS,
     AVATAR_TTS_MIN_SEGMENT_MS,
-    AVATAR_TTS_SEGMENT_MS,
-    SONIOX_TTS_FIRST_SEGMENT_MS,
-    SONIOX_TTS_MAX_SEGMENT_MS,
-    SONIOX_TTS_MIN_SEGMENT_MS,
-    SONIOX_TTS_SEGMENT_MS,
     SYNCTALK_MAX_CONCURRENCY,
 )
 from ..media.audio_utils import pcm_to_wav_bytes
@@ -25,8 +20,6 @@ from ..api.ws_writer import ClientClosedError
 
 log = logging.getLogger(__name__)
 
-_SENTENCE_BATCH_SIZE = 3
-_SENTENCE_BATCH_WAIT_S = 0.06
 _AVATAR_WORKER_COUNT = 1
 _SYNCTALK_SEMAPHORE: asyncio.Semaphore | None = None
 
@@ -91,7 +84,6 @@ class ResponseStream:
     async def flush(self) -> None:
         lang = self._get_lang()
         for sentence, idx in self._splitter.flush():
-            await self._emit_spoken_sentence(sentence)
             self._schedule_spoken_chunk(sentence, idx, lang)
 
     async def emit_spoken_text(self, text: str) -> None:
@@ -106,13 +98,7 @@ class ResponseStream:
         self.spoken_text += text
         lang = self._get_lang()
         for sentence, idx in self._splitter.feed(text):
-            await self._emit_spoken_sentence(sentence)
             self._schedule_spoken_chunk(sentence, idx, lang)
-
-    async def _emit_spoken_sentence(self, sentence: str) -> None:
-        cleaned = sentence.strip()
-        if not cleaned:
-            return
 
     async def _emit_chat_incremental(self, text: str) -> None:
         if not text:
@@ -164,27 +150,10 @@ class ResponseStream:
                 if item is None:
                     return
                 batch: list[tuple[str, int, str | None]] = [item]
-                close_after_batch = False
-                if self._streaming_media and self._media_chunk_idx > 0:
-                    while len(batch) < _SENTENCE_BATCH_SIZE:
-                        try:
-                            next_item = await asyncio.wait_for(
-                                self._media_queue.get(),
-                                timeout=_SENTENCE_BATCH_WAIT_S,
-                            )
-                        except asyncio.TimeoutError:
-                            break
-                        if next_item is None:
-                            close_after_batch = True
-                            break
-                        batch.append(next_item)
                 if self._streaming_media:
                     await self._run_streaming_sentence_batch(batch)
                 else:
                     await self._run_limited_sentence_batch(batch)
-                if close_after_batch and self._media_queue is not None:
-                    self._media_queue.put_nowait(None)
-                    return
         finally:
             if self._avatar_queue is not None:
                 for _ in self._avatar_worker_tasks:
@@ -241,6 +210,11 @@ class ResponseStream:
                 batch_lang = lang
                 break
 
+        # Pre-allocate media index so failures can be signalled to the frontend
+        media_idx = self._media_chunk_idx
+        self._media_chunk_idx += 1
+        self._chunk_count = max(self._chunk_count, media_idx + 1)
+
         async def prepared_texts():
             for sentence, _, _ in sentence_batch:
                 if sentence:
@@ -257,7 +231,6 @@ class ResponseStream:
                 sentences=len(sentence_batch),
                 chars=sum(len(sentence) for sentence, _, _ in sentence_batch),
             )
-            first_segment = True
             async for pcm in self._tts.synthesize_pcm_stream_from_texts(
                 prepared_texts(),
                 lang=batch_lang,
@@ -277,17 +250,15 @@ class ResponseStream:
                         bytes=len(pcm),
                     )
                 buffer.extend(pcm)
-                while True:
-                    target_ms = AVATAR_TTS_FIRST_SEGMENT_MS if first_segment else AVATAR_TTS_SEGMENT_MS
-                    target_bytes = _avatar_segment_target_bytes(sample_rate, target_ms)
-                    if len(buffer) < target_bytes:
-                        break
-                    segment = bytes(buffer[:target_bytes])
-                    del buffer[:target_bytes]
-                    await self._queue_pcm_segment(segment, sample_rate, source_idx)
-                    first_segment = False
             if buffer:
-                await self._queue_pcm_segment(_pad_pcm_tail(bytes(buffer), min_tail_bytes), sample_rate, source_idx)
+                await self._queue_pcm_segment(
+                    _pad_pcm_tail(bytes(buffer), min_tail_bytes),
+                    sample_rate,
+                    source_idx,
+                    media_idx=media_idx,
+                )
+            else:
+                await self._send_media_error(media_idx, "TTS returned no audio")
             log_event(
                 log,
                 "tts_stream_done",
@@ -301,7 +272,7 @@ class ResponseStream:
             raise
         except Exception as exc:
             log.exception("streaming TTS/avatar segment failed: source_idx=%s", source_idx)
-            await self._fail_next_media_chunk(f"TTS failed: {exc}")
+            await self._send_media_error(media_idx, f"TTS failed: {exc}")
 
     async def _run_streaming_avatar_worker(self) -> None:
         if self._avatar_queue is None:
@@ -312,6 +283,7 @@ class ResponseStream:
                 return
             media_idx, audio_wav = item
             frame_count = 0
+            error_sent = False
             started = perf_counter()
             try:
                 log_event(log, "avatar_chunk_start", request_id=self._turn_id, chunk=media_idx, bytes=len(audio_wav))
@@ -336,10 +308,11 @@ class ResponseStream:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                error_sent = True
                 log.exception("streaming avatar segment failed: chunk=%s", media_idx)
                 await self._send_media_error(media_idx, f"SyncTalk failed: {exc}")
             finally:
-                if frame_count == 0:
+                if frame_count == 0 and not error_sent:
                     await self._send_media_error(media_idx, "SyncTalk returned no frames")
                 log_event(
                     log,
@@ -354,19 +327,22 @@ class ResponseStream:
                 except ClientClosedError:
                     pass
 
-    async def _queue_pcm_segment(self, pcm: bytes, sample_rate: int, text_idx: int) -> None:
+    async def _queue_pcm_segment(self, pcm: bytes, sample_rate: int, text_idx: int, *, media_idx: int | None = None) -> None:
         if len(pcm) < 2:
             return
         if len(pcm) % 2:
             pcm = pcm[:-1]
-        media_idx = self._media_chunk_idx
-        self._media_chunk_idx += 1
-        self._chunk_count = max(self._chunk_count, media_idx + 1)
+        if media_idx is None:
+            media_idx = self._media_chunk_idx
+            self._media_chunk_idx += 1
+            self._chunk_count = max(self._chunk_count, media_idx + 1)
         audio_wav = pcm_to_wav_bytes(pcm, sample_rate)
         await self._queue_wav_segment(audio_wav, media_idx, text_idx, streaming=True)
 
     async def _queue_wav_segment(self, audio_wav: bytes, media_idx: int, text_idx: int, *, streaming: bool) -> None:
         audio_b64 = base64.b64encode(audio_wav).decode("ascii")
+        with wave.open(io.BytesIO(audio_wav)) as wf:
+            expected_frames = max(1, round(wf.getnframes() / wf.getframerate() * 25))
         try:
             await self._writer.send(
                 self._event(
@@ -377,6 +353,7 @@ class ResponseStream:
                         "source_chunk": text_idx,
                         "frame_stride": 1,
                         "streaming": streaming,
+                        "expected_frames": expected_frames,
                     }
                 )
             )
@@ -390,24 +367,6 @@ class ResponseStream:
             await self._writer.send(self._event({"type": "media_error", "chunk": chunk, "text": text}))
         except ClientClosedError:
             pass
-
-    async def _fail_next_media_chunk(self, text: str) -> None:
-        idx = self._media_chunk_idx
-        self._media_chunk_idx += 1
-        self._chunk_count = max(self._chunk_count, idx + 1)
-        await self._send_media_error(idx, text)
-
-    async def _run_limited_chunk(self, sentence: str, idx: int, lang: str | None) -> None:
-        try:
-            audio_wav = await self._tts.synthesize(sentence, lang=lang, priority=0 if idx == 0 else 1, voice=self._tts_voice)
-            await self._queue_wav_segment(audio_wav, idx, idx, streaming=False)
-        except ClientClosedError:
-            raise
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log.exception("response media chunk failed: chunk=%s", idx)
-            await self._send_media_error(idx, f"media chunk failed: {exc}")
 
     def build_answer_payload(self) -> dict:
         spoken = sanitize_spoken_text(self.spoken_text, keep_digits=True)
@@ -449,7 +408,7 @@ def _synctalk_semaphore() -> asyncio.Semaphore:
 
 def _log_task_results(results: list[object]) -> None:
     for result in results:
-        if isinstance(result, asyncio.CancelledError):
+        if isinstance(result, (asyncio.CancelledError, ClientClosedError)):
             continue
         if isinstance(result, BaseException):
             log.error("response media task failed", exc_info=(type(result), result, result.__traceback__))
@@ -458,20 +417,6 @@ def _log_task_results(results: list[object]) -> None:
 def _pcm_bytes_for_ms(sample_rate: int, ms: int) -> int:
     frames = max(1, int(sample_rate * max(1, ms) / 1000))
     return frames * 2
-
-
-def _segment_target_bytes(sample_rate: int, ms: int) -> int:
-    min_bytes = _pcm_bytes_for_ms(sample_rate, SONIOX_TTS_MIN_SEGMENT_MS)
-    max_bytes = _pcm_bytes_for_ms(sample_rate, SONIOX_TTS_MAX_SEGMENT_MS)
-    target_bytes = _pcm_bytes_for_ms(sample_rate, ms)
-    return max(2, min(max_bytes, max(target_bytes, min_bytes)))
-
-
-def _avatar_segment_target_bytes(sample_rate: int, ms: int) -> int:
-    min_bytes = _pcm_bytes_for_ms(sample_rate, AVATAR_TTS_MIN_SEGMENT_MS)
-    max_bytes = _pcm_bytes_for_ms(sample_rate, AVATAR_TTS_MAX_SEGMENT_MS)
-    target_bytes = _pcm_bytes_for_ms(sample_rate, ms)
-    return max(2, min(max_bytes, max(target_bytes, min_bytes)))
 
 
 def _pad_pcm_tail(pcm: bytes, min_bytes: int) -> bytes:

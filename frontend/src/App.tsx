@@ -221,7 +221,7 @@ export default function App() {
         case 'audio_ready': {
           if (isStaleTurn(msg.turn_id)) return
           const chunk = msg.chunk ?? 0
-          playbackRef.current.onAudioReady(chunk, msg.data, msg.frame_stride ?? 1, msg.turn_id, Boolean(msg.cached))
+          playbackRef.current.onAudioReady(chunk, msg.data, msg.frame_stride ?? 1, msg.turn_id, Boolean(msg.cached), msg.expected_frames as number | undefined)
           break
         }
         case 'frame': {

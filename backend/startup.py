@@ -36,5 +36,3 @@ async def startup_prewarm() -> None:
     await _prewarm_local_rag()
 
 
-async def shutdown_keepwarm() -> None:
-    return

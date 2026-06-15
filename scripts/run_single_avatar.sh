@@ -9,6 +9,12 @@ mkdir -p "$LOG_DIR" "$RUN_DIR"
 LAUNCHER_PID_FILE="$RUN_DIR/launcher.pid"
 PIDS_FILE="$RUN_DIR/pids"
 
+if [ -f "$ROOT/config.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$ROOT/config.env"
+  set +a
+fi
 if [ -f "$ROOT/.env" ]; then
   set -a
   # shellcheck disable=SC1091
@@ -30,7 +36,7 @@ AVATAR_LABEL="${VITE_AVATAR_LABEL:-$AVATAR_NAME}"
 PIDS=()
 NAMES=()
 
-"$WS_BACKEND_PYTHON_BIN" -m backend.reset_logs
+"$WS_BACKEND_PYTHON_BIN" -c "from backend.logging_config import reset_logs; reset_logs()"
 
 kill_tree() {
   local pid="$1"

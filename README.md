@@ -71,7 +71,12 @@ cd /home/admin-aifc/avatar-system-2
 python scripts/smoke_ws_text.py
 python scripts/smoke_ws_interrupt.py
 python scripts/capture_ws_tts.py --text Hello --out rec_1.wav
+python scripts/capture_ws_mp4.py --query "What is AIFC?" --output /tmp/synctalk_turn.mp4
 ```
+
+`capture_ws_mp4.py` depends on `ffmpeg` for MP4 encoding.
+Use `--no-ffmpeg-fallback` to still dump `output.frames/` PNGs and `output.wav`
+if you want to encode elsewhere.
 
 The UI source, public assets, and frontend config are local to this workspace.
 Generated frontend output, dependency installs, runtime logs, recordings, pid

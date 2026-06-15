@@ -263,8 +263,9 @@ export function useChunkPlayback(
       if (!renderActiveRef.current || !acRef.current) return
       const elapsed = Math.max(0, acRef.current.currentTime - t0)
       const frameCount = ch.frames.length
-      const effectiveFps = ch.frameDone && frameCount > 1
-        ? (frameCount - 1) / Math.max(0.001, buf.duration)
+      const knownTotal = ch.frameDone ? frameCount : (ch.expectedFrames ?? 0)
+      const effectiveFps = knownTotal > 1
+        ? (knownTotal - 1) / Math.max(0.001, buf.duration)
         : Math.max(
             1,
             Math.min(
@@ -307,13 +308,14 @@ export function useChunkPlayback(
     maybePlayNextRef.current = maybePlayNext
   }, [maybePlayNext])
 
-  const onAudioReady = useCallback((idx: number, b64: string, frameStride = 1, turnId?: string, cached = false) => {
+  const onAudioReady = useCallback((idx: number, b64: string, frameStride = 1, turnId?: string, cached = false, expectedFrames?: number) => {
     if (isStaleTurn(turnId)) return
     ensureChunk(idx)
     chunksRef.current[idx].audio = b64
     chunksRef.current[idx].frameStride = Math.max(1, frameStride)
     chunksRef.current[idx].cached = cached
     if (turnId) chunksRef.current[idx].turnId = turnId
+    if (expectedFrames != null) chunksRef.current[idx].expectedFrames = expectedFrames
     maybePlayNext()
   }, [ensureChunk, isStaleTurn, maybePlayNext])
 

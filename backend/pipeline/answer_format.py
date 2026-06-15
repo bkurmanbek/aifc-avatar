@@ -144,7 +144,7 @@ def normalize_query_signature(text: str) -> str:
 def _tts_splitter_profile(language: str | None) -> tuple[int, int, int, int]:
     if language == "zh":
         return 18, 24, 44, 14
-    return max(FIRST_TTS_CHARS, 48), max(MIN_TTS_CHARS, 80), max(MAX_TTS_CHARS, 220), max(SHORT_SENTENCE_CHARS, 40)
+    return FIRST_TTS_CHARS, MIN_TTS_CHARS, MAX_TTS_CHARS, SHORT_SENTENCE_CHARS
 
 
 def build_sentence_splitter(language: str | None = None) -> LowLatencyVoiceChunker:
@@ -220,10 +220,7 @@ def coerce_spoken_chat_payload(payload: object, language: str) -> dict[str, str]
 
 
 async def normalize_spoken_for_tts(raw_spoken: str, language: str, *, trim_for_latency: bool = True) -> str:
-    raw_text = raw_spoken or ""
-    if trim_for_latency:
-        raw_text = _trim_spoken_for_latency(raw_text, language)
-    spoken = prepare_tts_text(raw_text, language)
+    spoken = prepare_tts_text(raw_spoken or "", language)
     if not spoken:
         spoken = remove_repeated_sentences(sanitize_spoken_text(raw_spoken))
     if trim_for_latency:
