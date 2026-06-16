@@ -55,6 +55,7 @@ from ..intro import (
     IntroBlock,
     clear_intro_token_in_progress as _clear_intro_token_in_progress,
     ensure_intro_audio_file as _ensure_intro_audio_file,
+    intro_audio_path as _intro_audio_path,
     intro_frame_cache_info as _intro_frame_cache_info,
     intro_token_in_progress as _intro_token_in_progress,
     intro_token_seen as _intro_token_seen,
@@ -62,6 +63,7 @@ from ..intro import (
     load_intro_frames_from_cache as _load_intro_frames_from_cache,
     mark_intro_token_in_progress as _mark_intro_token_in_progress,
     mark_intro_token_played as _mark_intro_token_played,
+    safe_cache_key as _safe_cache_key,
     save_intro_frames_to_cache as _save_intro_frames_to_cache,
 )
 from ..pipeline.response_stream import ResponseStream
@@ -308,13 +310,14 @@ class ClientSession:
         return await _ensure_intro_audio_file(self.tts, block)
 
     async def _play_intro_block(self, block: IntroBlock, index: int, turn_id: str) -> None:
-        audio_wav = await self._ensure_intro_audio(block)
-        audio_b64 = base64.b64encode(audio_wav).decode("ascii")
+        await self._ensure_intro_audio(block)
+        from ..settings import INTRO_AVATAR_CACHE_KEY
+        audio_url = f"/intro-audio/{_safe_cache_key(INTRO_AVATAR_CACHE_KEY)}/{block.key}"
 
         async def send_audio_ready(expected_frames: int | None = None) -> None:
             msg: dict = {
                 "type": "audio_ready",
-                "data": audio_b64,
+                "audio_url": audio_url,
                 "chunk": index,
                 "source_chunk": index,
                 "frame_stride": 1,

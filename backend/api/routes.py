@@ -5,11 +5,12 @@ import json
 import logging
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from ..pipeline.answer_race import clear_answer_caches
 from ..intro import (
     canonical_intro_key as _canonical_intro_key,
+    intro_audio_path as _intro_audio_path,
     intro_frame_cache_info as _intro_frame_cache_info,
     intro_frame_range_path as _intro_frame_range_path,
     intro_frame_signature as _intro_frame_signature,
@@ -34,6 +35,24 @@ async def clear_runtime_caches() -> dict[str, object]:
     cleared = await clear_answer_caches()
     log_event(log, "runtime_caches_cleared", caches=json.dumps(cleared, sort_keys=True))
     return {"status": "ok", "cleared": cleared}
+
+
+@router.get("/intro-audio/{avatar}/{block_key}")
+async def intro_cache_audio(avatar: str, block_key: str) -> FileResponse:
+    safe_key = _canonical_intro_key(block_key)
+    if safe_key is None:
+        raise HTTPException(status_code=404, detail="intro block not found")
+    block = next((item for item in _load_intro_blocks() if item.key == safe_key), None)
+    if block is None:
+        raise HTTPException(status_code=404, detail="intro block not found")
+    path = _intro_audio_path(block)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="intro audio not cached yet")
+    return FileResponse(
+        path,
+        media_type="audio/wav",
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
 
 
 @router.get("/intro-cache/{avatar}/{block_key}")

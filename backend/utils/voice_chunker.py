@@ -75,9 +75,15 @@ class LowLatencyVoiceChunker:
         if not stripped_len:
             return len(text) if final else None
 
+        # Minimum chars before we allow a sentence-boundary cut.
+        # first_chars for the very first chunk so TTS starts quickly;
+        # min_chars for all subsequent chunks to avoid micro-sentence splits.
+        threshold = self._first_chars if self.chunk_idx == 0 else self._min_chars
+
         sentence_cut = None
         for match in _SENTENCE_BOUNDARY_RE.finditer(text):
-            if len(text[: match.end()].strip()) >= 1:
+            segment = text[: match.end()].strip()
+            if len(segment) >= threshold:
                 sentence_cut = match.end()
                 break
         max_cut = self._max_cut_index(text) if stripped_len >= self._max_chars else None

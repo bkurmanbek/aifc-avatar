@@ -3,12 +3,12 @@ import type { ChunkState } from '../types'
 import { FPS, CANVAS_W, CANVAS_H } from '../constants'
 
 const LIVE_FRAME_HEADROOM_S = 0.14
-const LIVE_READY_FRAME_HEADROOM = 4
-const CACHED_READY_FRAME_HEADROOM = 8
+const LIVE_READY_FRAME_HEADROOM = 1
+const CACHED_READY_FRAME_HEADROOM = 32
 const PRELOAD_FRAME_WINDOW = 48
-const FRAME_CACHE_INITIAL_LIMIT = 8
+const FRAME_CACHE_INITIAL_LIMIT = 32
 const FRAME_CACHE_NEXT_LIMIT = 24
-const FRAME_CACHE_FETCH_TIMEOUT_MS = 2500
+const FRAME_CACHE_FETCH_TIMEOUT_MS = 8000
 
 export interface PlaybackCallbacks {
   setMode: (mode: string) => void
@@ -42,6 +42,8 @@ export function useChunkPlayback(
   const frameCacheControllersRef = useRef<Set<AbortController>>(new Set())
   const maybePlayNextRef = useRef<() => void>(() => {})
   const playChunkRef = useRef<(idx: number) => void>(() => {})
+  // Chunk transition timing: record when a chunk ends so we can measure the gap to first frame of next chunk
+  const chunkEndTsRef = useRef<Record<number, number>>({})
 
   const chunksRef = useRef<Record<number, ChunkState>>({})
   const nextPlayChunkRef = useRef(0)
@@ -92,6 +94,8 @@ export function useChunkPlayback(
     renderActiveRef.current = false
     isPlayingRef.current = false
     streamActiveRef.current = false
+    // Reset perf log on new session so stale data doesn't accumulate
+    ;(window as Record<string, unknown>).__avatarPerf = []
     if (hideSpeakTimerRef.current) window.clearTimeout(hideSpeakTimerRef.current)
     if (chunkGapTimerRef.current) window.clearTimeout(chunkGapTimerRef.current)
     if (currentSrcRef.current) {
@@ -105,6 +109,7 @@ export function useChunkPlayback(
     nextPlayChunkRef.current = 0
     totalChunksRef.current = Infinity
     firstRenderReportedRef.current = {}
+    chunkEndTsRef.current = {}
     activeTurnIdRef.current = null
     hideSpeak()
   }, [hideSpeak])
@@ -180,10 +185,17 @@ export function useChunkPlayback(
       return
     }
 
-    const bytes = Uint8Array.from(atob(ch.audio), (c) => c.charCodeAt(0))
     let buf: AudioBuffer
     try {
-      buf = await acRef.current.decodeAudioData(bytes.buffer)
+      if (ch.decodedAudio) {
+        buf = ch.decodedAudio
+      } else if (ch.rawBuffer) {
+        // Intro path: WAV fetched via HTTP as ArrayBuffer — no atob conversion needed
+        buf = await acRef.current.decodeAudioData(ch.rawBuffer.slice(0))
+      } else {
+        const bytes = Uint8Array.from(atob(ch.audio), (c) => c.charCodeAt(0))
+        buf = await acRef.current.decodeAudioData(bytes.buffer)
+      }
     } catch (e) {
       cbRef.current.log(`audio decode err: ${(e as Error).message}`, 'err')
       chunkDone(idx)
@@ -224,15 +236,13 @@ export function useChunkPlayback(
       try { await firstImg.decode() } catch { /* continue; the render loop will retry */ }
     }
     if (playbackSession !== playbackSessionRef.current) return
+    // Kick off JPEG decodes for first window but don't await — render loop checks img.complete
     if (ch.cached) {
-      const preload = []
       for (let i = 1; i < Math.min(PRELOAD_FRAME_WINDOW, ch.frames.length); i += 1) {
         const img = getImg(i)
-        if (img && !img.complete) preload.push(img.decode().catch(() => undefined))
+        if (img && !img.complete) img.decode().catch(() => undefined)
       }
-      await Promise.all(preload)
     }
-    if (playbackSession !== playbackSessionRef.current) return
 
     const src = acRef.current.createBufferSource()
     src.buffer = buf
@@ -250,6 +260,7 @@ export function useChunkPlayback(
     const callChunkDone = () => {
       if (!chunkDoneCalled && playbackSession === playbackSessionRef.current) {
         chunkDoneCalled = true
+        chunkEndTsRef.current[idx] = performance.now()
         cbRef.current.onChunkPlaybackEnd?.(idx)
         chunkDone(idx)
       }
@@ -258,6 +269,11 @@ export function useChunkPlayback(
 
     let last = -1
     let renderStartedAt = 0
+    let lastDrawTs = 0
+    // Instrumentation — accessible in devtools as window.__avatarPerf
+    const perf: { t: number; fi: number; gap?: number; note?: string }[] = []
+    ;(window as Record<string, unknown>).__avatarPerf ??= []
+    ;((window as Record<string, unknown>).__avatarPerf as unknown[]).push({ chunk: idx, events: perf })
     const loop = () => {
       if (playbackSession !== playbackSessionRef.current) return
       if (!renderActiveRef.current || !acRef.current) return
@@ -281,18 +297,42 @@ export function useChunkPlayback(
         for (let i = displayIndex; i < Math.min(displayIndex + PRELOAD_FRAME_WINDOW, frameCount); i += 1) getImg(i)
       }
       const img = displayIndex >= 0 ? getImg(displayIndex) : undefined
+      const now = performance.now()
       if (img?.complete && displayIndex !== last) {
+        const gap = lastDrawTs > 0 ? now - lastDrawTs : 0
+        if (gap > 60) {
+          perf.push({ t: now, fi: displayIndex, gap: Math.round(gap), note: 'STUTTER' })
+          console.warn(`[avatar] chunk=${idx} stutter ${Math.round(gap)}ms at frame ${displayIndex}/${frameCount} elapsed=${elapsed.toFixed(2)}s`)
+        } else {
+          perf.push({ t: now, fi: displayIndex })
+        }
+        lastDrawTs = now
         showSpeak()
         ctx.drawImage(img, 0, 0, CANVAS_W, CANVAS_H)
         last = displayIndex
-        if (idx === 0 && renderStartedAt === 0) {
-          renderStartedAt = performance.now()
+        if (renderStartedAt === 0) {
+          renderStartedAt = now
           const key = `${ch.turnId ?? ''}:${idx}`
           if (!firstRenderReportedRef.current[key]) {
             firstRenderReportedRef.current[key] = true
             cbRef.current.onFirstFrameRender?.(idx, ch.turnId)
           }
+          if (idx > 0) {
+            const prevEndTs = chunkEndTsRef.current[idx - 1]
+            if (prevEndTs) {
+              const transitionGap = Math.round(now - prevEndTs)
+              perf.push({ t: now, fi: displayIndex, gap: transitionGap, note: `CHUNK_TRANSITION_FROM_${idx - 1}` })
+              if (transitionGap > 80) {
+                console.warn(`[avatar] chunk transition gap ${transitionGap}ms (chunk ${idx - 1} → ${idx})`)
+              } else {
+                console.log(`[avatar] chunk transition gap ${transitionGap}ms (chunk ${idx - 1} → ${idx})`)
+              }
+            }
+          }
         }
+      } else if (displayIndex >= 0 && !img?.complete && lastDrawTs > 0 && now - lastDrawTs > 60) {
+        perf.push({ t: now, fi: displayIndex, gap: Math.round(now - lastDrawTs), note: 'FRAME_NOT_DECODED' })
+        console.warn(`[avatar] chunk=${idx} frame ${displayIndex} not decoded yet, gap=${Math.round(now - lastDrawTs)}ms`)
       }
       if (elapsed < buf.duration + 0.2) requestAnimationFrame(loop)
       else callChunkDone()
@@ -311,12 +351,61 @@ export function useChunkPlayback(
   const onAudioReady = useCallback((idx: number, b64: string, frameStride = 1, turnId?: string, cached = false, expectedFrames?: number) => {
     if (isStaleTurn(turnId)) return
     ensureChunk(idx)
-    chunksRef.current[idx].audio = b64
-    chunksRef.current[idx].frameStride = Math.max(1, frameStride)
-    chunksRef.current[idx].cached = cached
-    if (turnId) chunksRef.current[idx].turnId = turnId
-    if (expectedFrames != null) chunksRef.current[idx].expectedFrames = expectedFrames
+    const ch = chunksRef.current[idx]
+    ch.audio = b64
+    ch.frameStride = Math.max(1, frameStride)
+    ch.cached = cached
+    if (turnId) ch.turnId = turnId
+    if (expectedFrames != null) ch.expectedFrames = expectedFrames
+    // Pre-decode audio eagerly while previous chunk may still be playing,
+    // so the decodeAudioData cost is not paid at transition time.
+    const playbackSession = playbackSessionRef.current
+    if (acRef.current && acRef.current.state === 'running') {
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
+      acRef.current.decodeAudioData(bytes.buffer.slice(0)).then((buf) => {
+        if (playbackSession !== playbackSessionRef.current || isStaleTurn(turnId)) return
+        if (chunksRef.current[idx]) chunksRef.current[idx].decodedAudio = buf
+      }).catch(() => { /* will retry in playChunk */ })
+    }
     maybePlayNext()
+  }, [ensureChunk, isStaleTurn, maybePlayNext])
+
+  // Used for intro audio served via HTTP URL — fetches WAV as ArrayBuffer (no atob overhead)
+  // and pre-decodes via AudioContext when available.
+  const onAudioReadyUrl = useCallback((idx: number, url: string, frameStride = 1, turnId?: string, cached = false, expectedFrames?: number) => {
+    if (isStaleTurn(turnId)) return
+    ensureChunk(idx)
+    const ch = chunksRef.current[idx]
+    ch.frameStride = Math.max(1, frameStride)
+    ch.cached = cached
+    if (turnId) ch.turnId = turnId
+    if (expectedFrames != null) ch.expectedFrames = expectedFrames
+    const playbackSession = playbackSessionRef.current
+    fetch(url)
+      .then((r) => r.arrayBuffer())
+      .then((buf) => {
+        if (playbackSession !== playbackSessionRef.current || isStaleTurn(turnId)) return
+        const target = chunksRef.current[idx]
+        if (!target) return
+        target.rawBuffer = buf
+        target.audio = '__url__'  // sentinel: audio data is in rawBuffer, not base64
+        // Pre-decode immediately if AudioContext is ready
+        if (acRef.current && acRef.current.state === 'running') {
+          acRef.current.decodeAudioData(buf.slice(0)).then((decoded) => {
+            if (playbackSession !== playbackSessionRef.current || isStaleTurn(turnId)) return
+            if (chunksRef.current[idx]) chunksRef.current[idx].decodedAudio = decoded
+            maybePlayNext()
+          }).catch(() => { /* decoded in playChunk fallback */ })
+        }
+        maybePlayNext()
+      })
+      .catch((e) => {
+        console.error('[audio_url fetch failed]', url, e)
+        if (chunksRef.current[idx]) {
+          chunksRef.current[idx].error = true
+          chunksRef.current[idx].frameDone = true
+        }
+      })
   }, [ensureChunk, isStaleTurn, maybePlayNext])
 
   const onFrame = useCallback((idx: number, b64: string, turnId?: string) => {
@@ -448,6 +537,7 @@ export function useChunkPlayback(
     ensureAudioContext,
     stopPlayback,
     onAudioReady,
+    onAudioReadyUrl,
     onFrameCache,
     onFrame,
     onChunkDone,

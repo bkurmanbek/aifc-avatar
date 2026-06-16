@@ -182,7 +182,7 @@ def _intro_audio_cache_lock() -> asyncio.Lock:
     return _INTRO_AUDIO_CACHE_LOCK
 
 
-def _intro_audio_path(block: IntroBlock) -> Path:
+def intro_audio_path(block: IntroBlock) -> Path:
     return INTRO_AUDIO_CACHE_DIR / _INTRO_BLOCK_FILENAMES[block.key]
 
 
@@ -216,7 +216,7 @@ def intro_token_in_progress(token: str | None) -> bool:
 
 
 def _intro_audio_meta_path(block: IntroBlock) -> Path:
-    return _intro_audio_path(block).with_suffix(".json")
+    return intro_audio_path(block).with_suffix(".json")
 
 
 def safe_cache_key(value: str) -> str:
@@ -260,7 +260,7 @@ def intro_frame_signature(block: IntroBlock) -> str:
 
 
 def _intro_audio_cache_is_valid(block: IntroBlock) -> bool:
-    path = _intro_audio_path(block)
+    path = intro_audio_path(block)
     meta_path = _intro_audio_meta_path(block)
     if not (path.exists() and path.stat().st_size > 44 and meta_path.exists()):
         return False
@@ -320,7 +320,7 @@ def save_intro_frames_to_cache(block: IntroBlock, frames: list[str]) -> None:
 
 
 async def ensure_intro_audio_file(tts: SonioxRealtimeTTS, block: IntroBlock) -> bytes:
-    path = _intro_audio_path(block)
+    path = intro_audio_path(block)
     meta_path = _intro_audio_meta_path(block)
     if _intro_audio_cache_is_valid(block):
         return path.read_bytes()

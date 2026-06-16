@@ -11,7 +11,7 @@ export type WsInbound =
   | { type: 'response_chunk'; text: string; turn_id?: string }
   | { type: 'answer_payload'; turn_id?: string; answer_id: string; spoken: string; chat: string }
   | { type: 'policy_state'; answer_language?: string | null; turn_id?: string }
-  | { type: 'audio_ready'; data: string; chunk?: number; frame_stride?: number; turn_id?: string; cached?: boolean }
+  | { type: 'audio_ready'; data?: string; audio_url?: string; chunk?: number; frame_stride?: number; turn_id?: string; cached?: boolean; expected_frames?: number }
   | { type: 'frame_cache'; url: string; chunk?: number; turn_id?: string; frame_count?: number }
   | { type: 'frame'; data: string; chunk?: number; turn_id?: string }
   | { type: 'chunk_done'; chunk?: number; turn_id?: string }
@@ -37,7 +37,9 @@ export type ChatMessage = {
 }
 
 export type ChunkState = {
-  audio: string | null
+  audio: string | null       // base64 WAV (Q&A path) or '__url__' sentinel (intro path)
+  rawBuffer?: ArrayBuffer    // raw WAV bytes from HTTP fetch (intro path — avoids atob cost)
+  decodedAudio?: AudioBuffer // pre-decoded AudioBuffer (used when available)
   frames: string[]
   frameDone: boolean
   frameStride: number
