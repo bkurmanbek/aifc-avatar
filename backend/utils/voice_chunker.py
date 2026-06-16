@@ -77,14 +77,11 @@ class LowLatencyVoiceChunker:
 
         sentence_cut = None
         for match in _SENTENCE_BOUNDARY_RE.finditer(text):
-            if len(text[: match.end()].strip()) >= self._short_chars:
+            if len(text[: match.end()].strip()) >= 1:
                 sentence_cut = match.end()
                 break
-        threshold = self._first_chars if self.chunk_idx == 0 else self._min_chars
-        threshold_cut = self._threshold_cut_index(text, threshold)
-        word_count_cut = self._word_count_cut_index(text)
         max_cut = self._max_cut_index(text) if stripped_len >= self._max_chars else None
-        candidates = [cut for cut in (sentence_cut, threshold_cut, word_count_cut, max_cut) if cut is not None]
+        candidates = [cut for cut in (sentence_cut, max_cut) if cut is not None]
         if candidates:
             return min(candidates)
 

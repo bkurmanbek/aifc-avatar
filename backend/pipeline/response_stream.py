@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from ..logging_config import log_event, preview_text
 from ..utils.spoken_text import sanitize_spoken_text
+from ..utils.tts_pronunciation import prepare_tts_text
 from ..settings import (
     AVATAR_TTS_MIN_SEGMENT_MS,
     SYNCTALK_MAX_CONCURRENCY,
@@ -21,7 +22,7 @@ from ..utils.debug_io import save_tts_chunk as _save_tts_chunk_debug
 
 log = logging.getLogger(__name__)
 
-_AVATAR_WORKER_COUNT = 1
+_AVATAR_WORKER_COUNT = 2
 _SYNCTALK_SEMAPHORE: asyncio.Semaphore | None = None
 
 
@@ -116,7 +117,7 @@ class ResponseStream:
             await self._writer.send(self._event({"type": "response_chunk", "text": text}))
 
     def _schedule_spoken_chunk(self, sentence: str, idx: int, lang: str | None) -> None:
-        cleaned = sanitize_spoken_text(sentence)
+        cleaned = prepare_tts_text(sentence, lang) if lang else sanitize_spoken_text(sentence)
         if not cleaned:
             return
         self._ensure_media_worker()

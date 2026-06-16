@@ -354,25 +354,33 @@ export function useChunkPlayback(
     }
     const load = async () => {
       try {
-        let payload = await fetchRange(0, FRAME_CACHE_INITIAL_LIMIT)
-        while (true) {
-          if (playbackSession !== playbackSessionRef.current || isStaleTurn(turnId)) return
-          const frames = Array.isArray(payload.frames)
-            ? payload.frames.map((frame) => String(frame)).filter(Boolean)
-            : []
-          if (frames.length) ch.frames.push(...frames)
-          ch.frameCacheLoading = false
-          if (idx === nextPlayChunkRef.current) maybePlayNext()
-          const nextStart = Number(payload.end ?? ch.frames.length)
-          const total = Number(payload.total ?? ch.frames.length)
-          if (!payload.has_more || nextStart >= total) {
-            ch.frameDone = true
-            if (idx === nextPlayChunkRef.current) maybePlayNext()
-            return
-          }
+        // First small batch so playback can start immediately
+        const first = await fetchRange(0, FRAME_CACHE_INITIAL_LIMIT)
+        if (playbackSession !== playbackSessionRef.current || isStaleTurn(turnId)) return
+        const firstFrames = Array.isArray(first.frames)
+          ? first.frames.map((frame) => String(frame)).filter(Boolean)
+          : []
+        if (firstFrames.length) ch.frames.push(...firstFrames)
+        ch.frameCacheLoading = false
+        if (idx === nextPlayChunkRef.current) maybePlayNext()
+
+        if (first.has_more) {
+          // Yield one macrotask so playback can begin, then load all remaining in one request
           await new Promise((resolve) => window.setTimeout(resolve, 0))
-          payload = await fetchRange(nextStart, FRAME_CACHE_NEXT_LIMIT)
+          if (playbackSession !== playbackSessionRef.current || isStaleTurn(turnId)) return
+          const nextStart = Number(first.end ?? firstFrames.length)
+          const remaining = Number(first.total ?? 0) - nextStart
+          if (remaining > 0) {
+            const rest = await fetchRange(nextStart, remaining)
+            if (playbackSession !== playbackSessionRef.current || isStaleTurn(turnId)) return
+            const restFrames = Array.isArray(rest.frames)
+              ? rest.frames.map((frame) => String(frame)).filter(Boolean)
+              : []
+            if (restFrames.length) ch.frames.push(...restFrames)
+          }
         }
+        ch.frameDone = true
+        if (idx === nextPlayChunkRef.current) maybePlayNext()
       } catch (error) {
         if (playbackSession !== playbackSessionRef.current) return
         ch.error = true

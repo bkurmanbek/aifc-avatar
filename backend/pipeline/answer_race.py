@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from time import perf_counter
 
@@ -12,10 +13,10 @@ from .answer_sources import (
     cache_candidate,
     cache_winner,
     clear_answer_caches as clear_source_caches,
-    external_rag_candidate,
+    gemini_external_rag_candidate,
     faq_candidate,
     gemini_local_rag_candidate,
-    local_rag_candidate,
+    retrieve_chunks_candidate,
     shutdown_answer_source_executor,
     timed_candidate,
 )
@@ -23,6 +24,7 @@ from .rag_routing import EXTERNAL_INTERNAL_RAG_TOOL, select_rag_tool
 from ..settings import (
     ANSWER_RACE_TIMEOUT_MS,
     EXTERNAL_RAG_FIRST_RESPONSE_TIMEOUT_S,
+    EXTERNAL_RAG_TIMEOUT_S,
     GEMINI_RAG_MAX_WAIT_MS,
 )
 
@@ -81,15 +83,20 @@ async def _external_only_race(
     conversation_memory: dict | None,
     started: float,
     timings: dict[str, object],
+    *,
+    on_spoken_delta: Callable[[str], Awaitable[None]] | None = None,
 ) -> AnswerRaceResult:
     candidates: list[RaceCandidate] = []
     try:
         candidate = await asyncio.wait_for(
             timed_candidate(
                 EXTERNAL_INTERNAL_RAG_TOOL,
-                external_rag_candidate(query, language, history, conversation_memory),
+                gemini_external_rag_candidate(
+                    query, language, history, conversation_memory,
+                    on_spoken_delta=on_spoken_delta,
+                ),
             ),
-            timeout=max(0.5, EXTERNAL_RAG_FIRST_RESPONSE_TIMEOUT_S),
+            timeout=max(0.5, EXTERNAL_RAG_TIMEOUT_S + GEMINI_RAG_MAX_WAIT_MS / 1000),
         )
     except asyncio.TimeoutError:
         log.warning(
@@ -114,19 +121,6 @@ def _finish_timings(timings: dict[str, object], winner: RaceCandidate, started: 
     timings["winner_confidence"] = winner.confidence
 
 
-async def _wait_for_local_candidate(
-    local_task: asyncio.Task[RaceCandidate | None],
-    deadline: float,
-) -> RaceCandidate | None:
-    try:
-        return local_task.result() if local_task.done() else await asyncio.wait_for(
-            asyncio.shield(local_task),
-            timeout=max(0.0, deadline - perf_counter()),
-        )
-    except asyncio.TimeoutError:
-        return None
-
-
 async def _wait_for_gemini_candidate(
     gemini_task: asyncio.Task[RaceCandidate | None],
     deadline: float,
@@ -147,6 +141,7 @@ async def run_answer_race(
     conversation_memory: dict | None,
     *,
     on_gemini_context_ready: GeminiContextCallback | None = None,
+    on_spoken_delta: Callable[[str], Awaitable[None]] | None = None,
 ) -> AnswerRaceResult:
     started = perf_counter()
     candidates: list[RaceCandidate] = []
@@ -165,7 +160,10 @@ async def run_answer_race(
     )
 
     if selected_tool == EXTERNAL_INTERNAL_RAG_TOOL:
-        return await _external_only_race(query, language, history, conversation_memory, started, timings)
+        return await _external_only_race(
+            query, language, history, conversation_memory, started, timings,
+            on_spoken_delta=on_spoken_delta,
+        )
 
     created_tasks: set[asyncio.Task[RaceCandidate | None]] = set()
 
@@ -174,7 +172,7 @@ async def run_answer_race(
         created_tasks.add(task)
         return task
 
-    local_task = create_candidate_task("local_rag", local_rag_candidate(query, language, history, conversation_memory))
+    retrieve_task = create_candidate_task("retrieve_chunks", retrieve_chunks_candidate(query, language, history, conversation_memory))
     gemini_task = create_candidate_task(
         "gemini_local_rag",
         gemini_local_rag_candidate(
@@ -182,8 +180,9 @@ async def run_answer_race(
             language,
             history,
             conversation_memory,
-            local_task,
+            retrieve_task,
             on_context_ready=on_gemini_context_ready,
+            on_spoken_delta=on_spoken_delta,
         ),
     )
     tasks: set[asyncio.Task[RaceCandidate | None]] = {
@@ -210,11 +209,6 @@ async def run_answer_race(
                     break
             if winner is not None or tasks == {gemini_task}:
                 break
-
-        if winner is None:
-            local_candidate = await _wait_for_local_candidate(local_task, max_wait_deadline)
-            if local_candidate is not None and local_candidate not in candidates:
-                winner = _record_candidate(local_candidate, candidates, timings)
 
         if winner is None:
             gemini_candidate = await _wait_for_gemini_candidate(gemini_task, max_wait_deadline)

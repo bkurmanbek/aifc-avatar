@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from time import perf_counter
 from types import SimpleNamespace
@@ -30,9 +31,7 @@ from .answer_common import (
     _citations,
     _confidence_from_score,
     _confidence_score,
-    _coverage_adjusted_confidence,
     _extractive_summary,
-    _query_coverage,
     aifc_overview_candidate,
     candidate_from_answer,
     fallback_message,
@@ -42,6 +41,93 @@ from .answer_common import (
 from .rag_routing import EXTERNAL_INTERNAL_RAG_TOOL, GEMINI_PUBLIC_RAG_TOOL
 
 log = logging.getLogger(__name__)
+
+_JSON_ESCAPE_MAP: dict[str, str] = {
+    '"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f",
+    "n": "\n", "r": "\r", "t": "\t",
+}
+
+
+class _SpokenFieldExtractor:
+    """Stream-parses the `spoken` JSON string field from Gemini streaming output."""
+
+    _TARGET = '"spoken"'
+
+    def __init__(self) -> None:
+        self._state = "searching"
+        self._buf = ""
+        self._ubuf = ""
+
+    @property
+    def done(self) -> bool:
+        return self._state == "done"
+
+    def feed(self, delta: str) -> str:
+        if self._state == "done":
+            return ""
+        out: list[str] = []
+        for ch in delta:
+            r = self._step(ch)
+            if r:
+                out.append(r)
+        return "".join(out)
+
+    def _step(self, ch: str) -> str:
+        s = self._state
+        if s == "searching":
+            self._buf += ch
+            if self._buf.endswith(self._TARGET):
+                self._buf = ""
+                self._state = "pre_colon"
+            elif len(self._buf) >= len(self._TARGET):
+                tail = self._buf[-(len(self._TARGET) - 1):]
+                for i in range(len(tail)):
+                    if self._TARGET.startswith(tail[i:]):
+                        self._buf = tail[i:]
+                        break
+                else:
+                    self._buf = ""
+            return ""
+        if s == "pre_colon":
+            if ch == ":":
+                self._state = "pre_quote"
+            elif ch not in " \t\n\r":
+                self._state = "searching"
+                self._buf = ch
+            return ""
+        if s == "pre_quote":
+            if ch == '"':
+                self._state = "in_string"
+            elif ch not in " \t\n\r":
+                self._state = "searching"
+                self._buf = ch
+            return ""
+        if s == "in_string":
+            if ch == "\\":
+                self._state = "in_escape"
+                return ""
+            if ch == '"':
+                self._state = "done"
+                return ""
+            return ch
+        if s == "in_escape":
+            if ch == "u":
+                self._state = "in_unicode"
+                self._ubuf = ""
+                return ""
+            self._state = "in_string"
+            return _JSON_ESCAPE_MAP.get(ch, ch)
+        if s == "in_unicode":
+            self._ubuf += ch
+            if len(self._ubuf) == 4:
+                self._state = "in_string"
+                try:
+                    return chr(int(self._ubuf, 16))
+                except ValueError:
+                    pass
+            return ""
+        return ""
+
 
 _LOCAL_RAG_SEMAPHORE: asyncio.Semaphore | None = None
 _LOCAL_RAG_EXECUTOR: ThreadPoolExecutor | None = None
@@ -217,60 +303,88 @@ async def external_rag_candidate(
     )
 
 
-async def local_rag_candidate(
+async def gemini_external_rag_candidate(
+    query: str,
+    language: str,
+    history: list[dict[str, str]],
+    conversation_memory: dict | None,
+    *,
+    on_spoken_delta: Callable[[str], Awaitable[None]] | None = None,
+) -> RaceCandidate | None:
+    """Fetch chunks from external RAG, then generate an answer via Gemini (same pipeline as local RAG)."""
+    result = await query_external_rag(query, language, history, conversation_memory)
+    chunks = result.chunks
+    citations = result.citations or _citations(chunks)
+    score = _best_chunk_score(chunks)
+    plan = _external_rag_plan(language)
+
+    if not chunks:
+        return RaceCandidate(
+            EXTERNAL_INTERNAL_RAG_TOOL,
+            "not_found",
+            0.0,
+            plan=plan,
+            chunks=[],
+            citations=[],
+            cacheable=False,
+        )
+
+    history_msgs, prompt = build_prompt(
+        query,
+        language,
+        chunks,
+        history,
+        conversation_memory=conversation_memory,
+        expert_mode=False,
+        needs_widget=False,
+    )
+    extractor = _SpokenFieldExtractor() if on_spoken_delta is not None else None
+    raw = ""
+    async for delta in stream_answer(history_msgs, prompt):
+        delta = delta or ""
+        raw += delta
+        if extractor is not None and not extractor.done and delta:
+            extracted = extractor.feed(delta)
+            if extracted:
+                await on_spoken_delta(extracted)  # type: ignore[misc]
+
+    if not raw.strip():
+        return None
+
+    is_fallback = is_fallback_raw_answer(raw)
+    confidence = "not_found" if is_fallback else "high"
+    return RaceCandidate(
+        source=EXTERNAL_INTERNAL_RAG_TOOL,
+        confidence=confidence,
+        score=_confidence_score(confidence, score),
+        raw_answer=raw,
+        plan=plan,
+        chunks=chunks,
+        citations=citations,
+        cacheable=False,
+    )
+
+
+async def retrieve_chunks_candidate(
     query: str,
     language: str,
     history: list[dict[str, str]],
     conversation_memory: dict | None,
 ) -> RaceCandidate | None:
+    """Retrieve and rank chunks only. Never generates an answer — Gemini always does that."""
     result = await _run_local_rag_limited(query, history, conversation_memory)
     if result is None:
-        return RaceCandidate("local_rag", "not_found", 0.0, chunks=[])
+        return RaceCandidate("retrieve_chunks", "not_found", 0.0, chunks=[])
 
-    plan, chunks, fast_hit = result
-    answer_language = getattr(plan, "answer_language", language) or language
-    if fast_hit and fast_hit.get("answer") and answer_language == language == "en":
-        return candidate_from_answer(
-            source=str(fast_hit.get("cache_type", "local_fast_hit")),
-            answer=str(fast_hit.get("answer", "")),
-            language=language,
-            confidence=str(fast_hit.get("confidence", "high")),
-            score=0.94,
-            plan=plan,
-            chunks=list(fast_hit.get("chunks") or chunks or []),
-            citations=list(fast_hit.get("citations") or _citations(chunks)),
-            cacheable=True,
-        )
-
+    plan, chunks, _fast_hit = result
     score = _best_chunk_score(chunks)
     confidence = _confidence_from_score(score, LOCAL_RAG_HIGH_THRESHOLD, LOCAL_RAG_PARTIAL_THRESHOLD)
-    if confidence == "not_found" or language != "en":
-        return RaceCandidate("local_rag", confidence, _confidence_score(confidence, score), plan=plan, chunks=chunks)
-
-    answer = _extractive_summary(query, chunks, language)
-    if not answer:
-        return RaceCandidate("local_rag", "not_found", 0.0, plan=plan, chunks=chunks)
-
-    coverage, token_count = _query_coverage(query, [], answer)
-    confidence = _coverage_adjusted_confidence(confidence, coverage, token_count)
-    if confidence == "not_found":
-        log.info(
-            "local_rag rejected by query coverage: coverage=%.2f query=%r answer=%r",
-            coverage,
-            query[:160],
-            answer[:160],
-        )
-        return RaceCandidate("local_rag", "not_found", _confidence_score("not_found", score), plan=plan, chunks=chunks)
-
-    return candidate_from_answer(
-        source="local_rag",
-        answer=answer,
-        language=language,
-        confidence=confidence,
-        score=score,
+    return RaceCandidate(
+        "retrieve_chunks",
+        confidence,
+        _confidence_score(confidence, score),
         plan=plan,
         chunks=chunks,
-        cacheable=confidence == "high",
     )
 
 
@@ -279,13 +393,14 @@ async def gemini_local_rag_candidate(
     language: str,
     history: list[dict[str, str]],
     conversation_memory: dict | None,
-    local_task: asyncio.Task[RaceCandidate | None],
+    retrieve_task: asyncio.Task[RaceCandidate | None],
     *,
     on_context_ready: GeminiContextCallback | None = None,
+    on_spoken_delta: Callable[[str], Awaitable[None]] | None = None,
 ) -> RaceCandidate | None:
-    local = await local_task
-    chunks = list(local.chunks)[:5] if local is not None else []
-    plan = local.plan if local is not None and local.plan is not None else SimpleNamespace(answer_language=language)
+    retrieved = await retrieve_task
+    chunks = list(retrieved.chunks)[:5] if retrieved is not None else []
+    plan = retrieved.plan if retrieved is not None and retrieved.plan is not None else SimpleNamespace(answer_language=language)
     with contextlib.suppress(Exception):
         setattr(plan, "route", GEMINI_PUBLIC_RAG_TOOL)
     score = _best_chunk_score(chunks)
@@ -301,15 +416,21 @@ async def gemini_local_rag_candidate(
         expert_mode=bool(getattr(plan, "expert_mode", False)),
         needs_widget=bool(getattr(plan, "needs_widget", False)),
     )
+    extractor = _SpokenFieldExtractor() if on_spoken_delta is not None else None
     raw = ""
     async for delta in stream_answer(history_msgs, prompt):
-        raw += delta or ""
+        delta = delta or ""
+        raw += delta
+        if extractor is not None and not extractor.done and delta:
+            extracted = extractor.feed(delta)
+            if extracted:
+                await on_spoken_delta(extracted)  # type: ignore[misc]
     if not raw.strip():
         return None
 
     is_fallback = is_fallback_raw_answer(raw)
     confidence = "not_found" if is_fallback else "high"
-    timings = dict(local.timings) if local is not None else {}
+    timings = dict(retrieved.timings) if retrieved is not None else {}
     return RaceCandidate(
         source="gemini_local_rag",
         confidence=confidence,

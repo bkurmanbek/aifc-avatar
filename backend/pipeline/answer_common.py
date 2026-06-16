@@ -224,19 +224,22 @@ def _extractive_summary(query: str, chunks: list[dict], language: str) -> str:
         key = re.sub(r"\W+", " ", cleaned.casefold()).strip()
         if key in seen or len(cleaned.split()) < 4:
             continue
+        if seen and any(key in existing or existing in key for existing in seen):
+            continue
         seen.add(key)
         selected.append(cleaned)
-        break
+        if len(selected) >= 3:
+            break
     if not selected:
         fallback = sanitize_spoken_text(_answer_body_text(chunks[0])[:260], keep_digits=True) if chunks else ""
         selected = [fallback] if fallback else []
 
     summary = " ".join(selected).strip()
     if language == "zh":
-        return summary[:90].strip()
+        return summary[:120].strip()
     words = summary.split()
-    if len(words) > 52:
-        summary = " ".join(words[:52]).rstrip(" ,;:") + "."
+    if len(words) > 90:
+        summary = " ".join(words[:90]).rstrip(" ,;:") + "."
     return summary
 
 
@@ -267,7 +270,11 @@ def _short_detail_point(text: str, max_words: int = 34) -> str:
 def _chat_for_candidate(spoken: str, chunks: list[dict] | None = None) -> str:
     lines = [spoken.strip()]
     points: list[str] = []
-    seen: set[str] = {re.sub(r"\W+", " ", spoken.casefold()).strip()}
+    seen: set[str] = set()
+    for part in _SENTENCE_RE.split(spoken):
+        key = re.sub(r"\W+", " ", part.casefold()).strip()
+        if key:
+            seen.add(key)
     for chunk in (chunks or [])[:4]:
         for sentence in _sentence_candidates(_answer_body_text(chunk))[:4]:
             point = _short_detail_point(sentence)
@@ -295,10 +302,10 @@ def _trim_for_first_spoken(text: str) -> str:
         return ""
     parts = [part.strip() for part in _SENTENCE_RE.split(cleaned) if part.strip()]
     if parts:
-        cleaned = " ".join(parts[:2])
+        cleaned = " ".join(parts[:4])
     words = cleaned.split()
-    if len(words) > 40:
-        cleaned = " ".join(words[:40]).rstrip(" ,;:") + "."
+    if len(words) > 75:
+        cleaned = " ".join(words[:75]).rstrip(" ,;:") + "."
     return cleaned
 
 

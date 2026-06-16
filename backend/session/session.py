@@ -311,19 +311,20 @@ class ClientSession:
         audio_wav = await self._ensure_intro_audio(block)
         audio_b64 = base64.b64encode(audio_wav).decode("ascii")
 
-        async def send_audio_ready() -> None:
-            await self.writer.send(
-                {
-                    "type": "audio_ready",
-                    "data": audio_b64,
-                    "chunk": index,
-                    "source_chunk": index,
-                    "frame_stride": 1,
-                    "streaming": True,
-                    "cached": True,
-                    "turn_id": turn_id,
-                }
-            )
+        async def send_audio_ready(expected_frames: int | None = None) -> None:
+            msg: dict = {
+                "type": "audio_ready",
+                "data": audio_b64,
+                "chunk": index,
+                "source_chunk": index,
+                "frame_stride": 1,
+                "streaming": True,
+                "cached": True,
+                "turn_id": turn_id,
+            }
+            if expected_frames is not None:
+                msg["expected_frames"] = expected_frames
+            await self.writer.send(msg)
 
         cache_info = _intro_frame_cache_info(block)
         if cache_info is not None:
@@ -337,14 +338,14 @@ class ClientSession:
                     "frame_count": frame_count,
                 }
             )
-            await send_audio_ready()
+            await send_audio_ready(expected_frames=frame_count)
             return
         cached_frames = _load_intro_frames_from_cache(block)
         if cached_frames:
             headroom = min(_INTRO_FRAME_HEADROOM, len(cached_frames))
             for frame in cached_frames[:headroom]:
                 await self.writer.send({"type": "frame", "data": frame, "chunk": index, "turn_id": turn_id})
-            await send_audio_ready()
+            await send_audio_ready(expected_frames=len(cached_frames))
             for offset, frame in enumerate(cached_frames[headroom:], start=1):
                 await self.writer.send({"type": "frame", "data": frame, "chunk": index, "turn_id": turn_id})
                 if offset % _INTRO_CACHED_FRAME_BATCH == 0:
@@ -812,6 +813,15 @@ class ClientSession:
                 metrics.plan_done_at = perf_counter()
             await ensure_response_stream(plan_update, chunks_update)
 
+        spoken_streaming_active = False
+
+        async def on_spoken_delta(delta: str) -> None:
+            nonlocal spoken_streaming_active
+            if stream is None or not delta:
+                return
+            spoken_streaming_active = True
+            await stream.emit_spoken_text(delta)
+
         try:
             log_event(log, "pipeline_start", session_id=self.session_id, request_id=turn_id, mode=metrics.mode, language=language, interrupted=interrupted_input, query=query[:160])
             self.history.append({"role": "user", "content": query})
@@ -834,6 +844,7 @@ class ClientSession:
                     history_before_current,
                     self.conversation_memory,
                     on_gemini_context_ready=on_gemini_context_ready,
+                    on_spoken_delta=on_spoken_delta,
                 )
                 metrics.race_timings.update(race_result.timings)
                 winner = race_result.winner
@@ -869,11 +880,17 @@ class ClientSession:
             spoken = await _normalize_spoken_for_tts(
                 answer_payload.get("spoken", ""),
                 language,
-                trim_for_latency=True,
+                trim_for_latency=False,
             )
             chat = str(answer_payload.get("chat") or spoken).strip() or spoken
             _save_response_debug(turn_id, spoken, chat)
-            await stream.emit_spoken_text(spoken)
+            winner_already_streamed = (
+                spoken_streaming_active
+                and race_result is not None
+                and race_result.winner.source in ("gemini_local_rag", "external_internal_rag")
+            )
+            if not winner_already_streamed:
+                await stream.emit_spoken_text(spoken)
             if chat:
                 await stream.emit_chat_text(chat)
             await stream.flush()

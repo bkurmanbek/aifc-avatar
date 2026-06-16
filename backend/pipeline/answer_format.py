@@ -31,8 +31,8 @@ _NOISE_REPLY_BY_LANGUAGE = {
     "kk": "Сұрағыңызды анық естімедім. Қайта айтып беріңіз.",
     "zh": "我没有听清问题，请再说一遍。",
 }
-_MAX_SPOKEN_WORDS = 28
-_MAX_SPOKEN_CHARS = 180
+_MAX_SPOKEN_WORDS = 80
+_MAX_SPOKEN_CHARS = 600
 _SPOKEN_SOFT_CUT_RE = re.compile(r"[,;:，；、]")
 _FINAL_DOMAIN_TERMS = {
     "aifc", "afsa", "aix", "iac", "fintech", "expat", "centre", "center",
