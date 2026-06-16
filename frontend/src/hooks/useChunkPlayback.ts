@@ -3,10 +3,10 @@ import type { ChunkState } from '../types'
 import { FPS, CANVAS_W, CANVAS_H } from '../constants'
 
 const LIVE_FRAME_HEADROOM_S = 0.14
-const LIVE_READY_FRAME_HEADROOM = 1
+const LIVE_READY_FRAME_HEADROOM = 4
 const CACHED_READY_FRAME_HEADROOM = 32
 const PRELOAD_FRAME_WINDOW = 48
-const FRAME_CACHE_INITIAL_LIMIT = 32
+const FRAME_CACHE_INITIAL_LIMIT = 48
 const FRAME_CACHE_NEXT_LIMIT = 24
 const FRAME_CACHE_FETCH_TIMEOUT_MS = 8000
 
@@ -119,7 +119,14 @@ export function useChunkPlayback(
   }, [])
 
   const ensureChunk = useCallback((idx: number) => {
-    if (!chunksRef.current[idx]) chunksRef.current[idx] = { audio: null, frames: [], frameDone: false, frameStride: 1 }
+    if (!chunksRef.current[idx]) chunksRef.current[idx] = { audio: null, frames: [], imgCache: {}, frameDone: false, frameStride: 1 }
+  }, [])
+
+  const preloadFrame = useCallback((ch: ChunkState, frameIdx: number) => {
+    if (ch.imgCache[frameIdx] || !ch.frames[frameIdx]) return
+    const img = new Image()
+    img.src = `data:image/jpeg;base64,${ch.frames[frameIdx]}`
+    ch.imgCache[frameIdx] = img
   }, [])
 
   const isChunkReadyToPlay = useCallback((_idx: number, ch: ChunkState | undefined) => {
@@ -220,14 +227,14 @@ export function useChunkPlayback(
       return
     }
 
-    const cache: Record<number, HTMLImageElement> = {}
+    // Use the chunk's eagerly-loaded image cache; fall back to creating on demand
     const getImg = (i: number) => {
-      if (!cache[i] && ch.frames[i]) {
+      if (!ch.imgCache[i] && ch.frames[i]) {
         const img = new Image()
         img.src = `data:image/jpeg;base64,${ch.frames[i]}`
-        cache[i] = img
+        ch.imgCache[i] = img
       }
-      return cache[i]
+      return ch.imgCache[i]
     }
 
     for (let i = 0; i < Math.min(PRELOAD_FRAME_WINDOW, ch.frames.length); i += 1) getImg(i)
@@ -412,9 +419,12 @@ export function useChunkPlayback(
     if (isStaleTurn(turnId)) return
     ensureChunk(idx)
     if (turnId) chunksRef.current[idx].turnId = turnId
-    chunksRef.current[idx].frames.push(b64)
+    const ch = chunksRef.current[idx]
+    const frameIdx = ch.frames.length
+    ch.frames.push(b64)
+    preloadFrame(ch, frameIdx)
     if (idx === nextPlayChunkRef.current) maybePlayNext()
-  }, [ensureChunk, isStaleTurn, maybePlayNext])
+  }, [ensureChunk, isStaleTurn, maybePlayNext, preloadFrame])
 
   const onFrameCache = useCallback((idx: number, url: string, turnId?: string) => {
     if (isStaleTurn(turnId)) return
@@ -449,7 +459,12 @@ export function useChunkPlayback(
         const firstFrames = Array.isArray(first.frames)
           ? first.frames.map((frame) => String(frame)).filter(Boolean)
           : []
-        if (firstFrames.length) ch.frames.push(...firstFrames)
+        if (firstFrames.length) {
+          const offset = ch.frames.length
+          ch.frames.push(...firstFrames)
+          // Eagerly decode JPEG images so they're ready before playback starts
+          for (let i = 0; i < firstFrames.length; i++) preloadFrame(ch, offset + i)
+        }
         ch.frameCacheLoading = false
         if (idx === nextPlayChunkRef.current) maybePlayNext()
 
@@ -465,7 +480,11 @@ export function useChunkPlayback(
             const restFrames = Array.isArray(rest.frames)
               ? rest.frames.map((frame) => String(frame)).filter(Boolean)
               : []
-            if (restFrames.length) ch.frames.push(...restFrames)
+            if (restFrames.length) {
+              const offset2 = ch.frames.length
+              ch.frames.push(...restFrames)
+              for (let i = 0; i < restFrames.length; i++) preloadFrame(ch, offset2 + i)
+            }
           }
         }
         ch.frameDone = true
@@ -481,7 +500,7 @@ export function useChunkPlayback(
       }
     }
     void load()
-  }, [chunkDone, ensureChunk, isStaleTurn, maybePlayNext])
+  }, [chunkDone, ensureChunk, isStaleTurn, maybePlayNext, preloadFrame])
 
   const onChunkDone = useCallback((idx: number, turnId?: string) => {
     if (isStaleTurn(turnId)) return

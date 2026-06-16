@@ -31,6 +31,10 @@ export default defineConfig(({ mode }) => {
         '/intro-cache': {
           target: backendHttpTarget,
           changeOrigin: true
+        },
+        '/intro-audio': {
+          target: backendHttpTarget,
+          changeOrigin: true
         }
       }
     }
