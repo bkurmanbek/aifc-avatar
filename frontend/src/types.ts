@@ -41,7 +41,8 @@ export type ChunkState = {
   rawBuffer?: ArrayBuffer    // raw WAV bytes from HTTP fetch (intro path — avoids atob cost)
   decodedAudio?: AudioBuffer // pre-decoded AudioBuffer (used when available)
   frames: string[]
-  imgCache: Record<number, HTMLImageElement>  // eagerly decoded Image objects
+  bitmapCache: Record<number, ImageBitmap>  // GPU-ready bitmaps decoded off-thread
+  bitmapPending: Set<number>                // frame indices currently being decoded
   frameDone: boolean
   frameStride: number
   expectedFrames?: number

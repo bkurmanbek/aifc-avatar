@@ -119,14 +119,21 @@ export function useChunkPlayback(
   }, [])
 
   const ensureChunk = useCallback((idx: number) => {
-    if (!chunksRef.current[idx]) chunksRef.current[idx] = { audio: null, frames: [], imgCache: {}, frameDone: false, frameStride: 1 }
+    if (!chunksRef.current[idx]) chunksRef.current[idx] = { audio: null, frames: [], bitmapCache: {}, bitmapPending: new Set(), frameDone: false, frameStride: 1 }
   }, [])
 
-  const preloadFrame = useCallback((ch: ChunkState, frameIdx: number) => {
-    if (ch.imgCache[frameIdx] || !ch.frames[frameIdx]) return
+  // Decode one JPEG frame off-thread via createImageBitmap and cache the GPU bitmap
+  const preloadBitmap = useCallback((ch: ChunkState, frameIdx: number) => {
+    if (ch.bitmapCache[frameIdx] || ch.bitmapPending.has(frameIdx) || !ch.frames[frameIdx]) return
+    ch.bitmapPending.add(frameIdx)
     const img = new Image()
     img.src = `data:image/jpeg;base64,${ch.frames[frameIdx]}`
-    ch.imgCache[frameIdx] = img
+    createImageBitmap(img).then(bitmap => {
+      ch.bitmapPending.delete(frameIdx)
+      ch.bitmapCache[frameIdx] = bitmap
+    }).catch(() => {
+      ch.bitmapPending.delete(frameIdx)
+    })
   }, [])
 
   const isChunkReadyToPlay = useCallback((_idx: number, ch: ChunkState | undefined) => {
@@ -227,29 +234,9 @@ export function useChunkPlayback(
       return
     }
 
-    // Use the chunk's eagerly-loaded image cache; fall back to creating on demand
-    const getImg = (i: number) => {
-      if (!ch.imgCache[i] && ch.frames[i]) {
-        const img = new Image()
-        img.src = `data:image/jpeg;base64,${ch.frames[i]}`
-        ch.imgCache[i] = img
-      }
-      return ch.imgCache[i]
-    }
-
-    for (let i = 0; i < Math.min(PRELOAD_FRAME_WINDOW, ch.frames.length); i += 1) getImg(i)
-    const firstImg = getImg(0)
-    if (firstImg && !firstImg.complete) {
-      try { await firstImg.decode() } catch { /* continue; the render loop will retry */ }
-    }
+    // Kick off bitmap decode for the first window; render loop extends this progressively
+    for (let i = 0; i < Math.min(PRELOAD_FRAME_WINDOW, ch.frames.length); i += 1) preloadBitmap(ch, i)
     if (playbackSession !== playbackSessionRef.current) return
-    // Kick off JPEG decodes for first window but don't await — render loop checks img.complete
-    if (ch.cached) {
-      for (let i = 1; i < Math.min(PRELOAD_FRAME_WINDOW, ch.frames.length); i += 1) {
-        const img = getImg(i)
-        if (img && !img.complete) img.decode().catch(() => undefined)
-      }
-    }
 
     const src = acRef.current.createBufferSource()
     src.buffer = buf
@@ -300,12 +287,13 @@ export function useChunkPlayback(
           )
       const fi = Math.floor(elapsed * effectiveFps)
       const displayIndex = frameCount > 0 ? Math.min(fi, frameCount - 1) : -1
+      // Trigger bitmap decode for upcoming frames (progressive, never bulk)
       if (displayIndex >= 0) {
-        for (let i = displayIndex; i < Math.min(displayIndex + PRELOAD_FRAME_WINDOW, frameCount); i += 1) getImg(i)
+        for (let i = displayIndex; i < Math.min(displayIndex + PRELOAD_FRAME_WINDOW, frameCount); i += 1) preloadBitmap(ch, i)
       }
-      const img = displayIndex >= 0 ? getImg(displayIndex) : undefined
+      const bitmap = displayIndex >= 0 ? ch.bitmapCache[displayIndex] : undefined
       const now = performance.now()
-      if (img?.complete && displayIndex !== last) {
+      if (bitmap && displayIndex !== last) {
         const gap = lastDrawTs > 0 ? now - lastDrawTs : 0
         if (gap > 60) {
           perf.push({ t: now, fi: displayIndex, gap: Math.round(gap), note: 'STUTTER' })
@@ -315,7 +303,7 @@ export function useChunkPlayback(
         }
         lastDrawTs = now
         showSpeak()
-        ctx.drawImage(img, 0, 0, CANVAS_W, CANVAS_H)
+        ctx.drawImage(bitmap, 0, 0, CANVAS_W, CANVAS_H)
         last = displayIndex
         if (renderStartedAt === 0) {
           renderStartedAt = now
@@ -337,15 +325,15 @@ export function useChunkPlayback(
             }
           }
         }
-      } else if (displayIndex >= 0 && !img?.complete && lastDrawTs > 0 && now - lastDrawTs > 60) {
-        perf.push({ t: now, fi: displayIndex, gap: Math.round(now - lastDrawTs), note: 'FRAME_NOT_DECODED' })
-        console.warn(`[avatar] chunk=${idx} frame ${displayIndex} not decoded yet, gap=${Math.round(now - lastDrawTs)}ms`)
+      } else if (displayIndex >= 0 && !bitmap && lastDrawTs > 0 && now - lastDrawTs > 60) {
+        perf.push({ t: now, fi: displayIndex, gap: Math.round(now - lastDrawTs), note: 'BITMAP_NOT_READY' })
+        console.warn(`[avatar] chunk=${idx} bitmap ${displayIndex} not ready, gap=${Math.round(now - lastDrawTs)}ms`)
       }
       if (elapsed < buf.duration + 0.2) requestAnimationFrame(loop)
       else callChunkDone()
     }
     requestAnimationFrame(loop)
-  }, [speakCvsRef, showSpeak, chunkDone])
+  }, [speakCvsRef, showSpeak, chunkDone, preloadBitmap])
 
   useEffect(() => {
     playChunkRef.current = playChunk
@@ -422,9 +410,9 @@ export function useChunkPlayback(
     const ch = chunksRef.current[idx]
     const frameIdx = ch.frames.length
     ch.frames.push(b64)
-    preloadFrame(ch, frameIdx)
+    preloadBitmap(ch, frameIdx)
     if (idx === nextPlayChunkRef.current) maybePlayNext()
-  }, [ensureChunk, isStaleTurn, maybePlayNext, preloadFrame])
+  }, [ensureChunk, isStaleTurn, maybePlayNext, preloadBitmap])
 
   const onFrameCache = useCallback((idx: number, url: string, turnId?: string) => {
     if (isStaleTurn(turnId)) return
@@ -462,8 +450,8 @@ export function useChunkPlayback(
         if (firstFrames.length) {
           const offset = ch.frames.length
           ch.frames.push(...firstFrames)
-          // Eagerly decode JPEG images so they're ready before playback starts
-          for (let i = 0; i < firstFrames.length; i++) preloadFrame(ch, offset + i)
+          // Pre-decode only the initial batch — render loop handles the rest progressively
+          for (let i = 0; i < firstFrames.length; i++) preloadBitmap(ch, offset + i)
         }
         ch.frameCacheLoading = false
         if (idx === nextPlayChunkRef.current) maybePlayNext()
@@ -480,11 +468,8 @@ export function useChunkPlayback(
             const restFrames = Array.isArray(rest.frames)
               ? rest.frames.map((frame) => String(frame)).filter(Boolean)
               : []
-            if (restFrames.length) {
-              const offset2 = ch.frames.length
-              ch.frames.push(...restFrames)
-              for (let i = 0; i < restFrames.length; i++) preloadFrame(ch, offset2 + i)
-            }
+            // Just push frames — render loop preloads bitmaps progressively (PRELOAD_FRAME_WINDOW ahead)
+            if (restFrames.length) ch.frames.push(...restFrames)
           }
         }
         ch.frameDone = true
@@ -500,7 +485,7 @@ export function useChunkPlayback(
       }
     }
     void load()
-  }, [chunkDone, ensureChunk, isStaleTurn, maybePlayNext, preloadFrame])
+  }, [chunkDone, ensureChunk, isStaleTurn, maybePlayNext, preloadBitmap])
 
   const onChunkDone = useCallback((idx: number, turnId?: string) => {
     if (isStaleTurn(turnId)) return
