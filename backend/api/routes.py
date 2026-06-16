@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from ..pipeline.answer_race import clear_answer_caches
 from ..intro import (
     canonical_intro_key as _canonical_intro_key,
+    ensure_intro_video as _ensure_intro_video,
     intro_audio_path as _intro_audio_path,
     intro_frame_cache_info as _intro_frame_cache_info,
     intro_frame_range_path as _intro_frame_range_path,
@@ -35,6 +36,23 @@ async def clear_runtime_caches() -> dict[str, object]:
     cleared = await clear_answer_caches()
     log_event(log, "runtime_caches_cleared", caches=json.dumps(cleared, sort_keys=True))
     return {"status": "ok", "cleared": cleared}
+
+
+@router.get("/intro-video/{avatar}/{name}")
+async def intro_cache_video(avatar: str, name: str) -> FileResponse:
+    if _safe_cache_key(avatar) != _safe_cache_key(INTRO_AVATAR_CACHE_KEY):
+        raise HTTPException(status_code=404, detail="intro video not found")
+    blocks = _load_intro_blocks()
+    if not blocks:
+        raise HTTPException(status_code=404, detail="intro not configured")
+    path = await _ensure_intro_video(blocks)
+    if path is None or not path.exists():
+        raise HTTPException(status_code=404, detail="intro video not available")
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
 
 
 @router.get("/intro-audio/{avatar}/{block_key}")

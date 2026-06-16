@@ -61,6 +61,39 @@ class WsWriter:
                 self._log_send("ws_send_failed", data, exc=exc)
                 raise ClientClosedError() from exc
 
+    async def send_frame_binary(self, chunk: int, jpeg: bytes, *, turn_id: str | None = None) -> None:
+        """Send one avatar JPEG frame as a binary WS message.
+
+        Frames are the highest-frequency message (25/s); shipping them as raw bytes
+        avoids the base64 inflation + per-frame JSON.parse + atob the client paid when
+        frames were embedded in JSON. Binary layout (little-endian):
+            byte 0      magic 0xF1 (frame)
+            bytes 1-2   chunk index (uint16)
+            byte 3      turn_id length (uint8)
+            bytes 4..   turn_id (ascii)
+            rest        JPEG bytes
+        """
+        if self._closed:
+            raise ClientClosedError()
+        if turn_id is not None and turn_id != self._active_turn_id:
+            self._log_send("ws_send_dropped_inactive_turn", {"type": "frame", "chunk": chunk, "turn_id": turn_id})
+            return
+        tid = (turn_id or "").encode("ascii", "ignore")[:255]
+        header = bytes([0xF1]) + (chunk & 0xFFFF).to_bytes(2, "little") + bytes([len(tid)]) + tid
+        async with self._lock:
+            if self._closed:
+                raise ClientClosedError()
+            if turn_id is not None and turn_id != self._active_turn_id:
+                return
+            try:
+                await self._ws.send_bytes(header + jpeg)
+                if self._on_send is not None:
+                    self._on_send({"type": "frame", "chunk": chunk, "turn_id": turn_id})
+            except Exception as exc:
+                self._closed = True
+                self._log_send("ws_send_failed", {"type": "frame", "chunk": chunk}, exc=exc)
+                raise ClientClosedError() from exc
+
     @property
     def closed(self) -> bool:
         return self._closed

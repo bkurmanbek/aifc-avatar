@@ -13,7 +13,9 @@ from ..logging_config import log_event, preview_text
 from ..utils.spoken_text import sanitize_spoken_text
 from ..utils.tts_pronunciation import prepare_tts_text
 from ..settings import (
+    AVATAR_TTS_FIRST_SEGMENT_MS,
     AVATAR_TTS_MIN_SEGMENT_MS,
+    AVATAR_TTS_SEGMENT_MS,
     SYNCTALK_MAX_CONCURRENCY,
 )
 from ..media.audio_utils import pcm_to_wav_bytes
@@ -55,10 +57,15 @@ class ResponseStream:
         self._chunk_count = 0
         self._streaming_media = bool(getattr(tts, "supports_streaming_avatar", False))
         self._media_queue: asyncio.Queue[tuple[str, int, str | None] | None] | None = asyncio.Queue()
-        self._avatar_queue: asyncio.Queue[tuple[int, bytes] | None] | None = asyncio.Queue()
+        self._avatar_queue: asyncio.Queue[tuple[int, bytes, int] | None] | None = asyncio.Queue()
         self._media_worker_task: asyncio.Task | None = None
         self._avatar_worker_tasks: list[asyncio.Task] = []
         self._media_chunk_idx = 0
+        # Cumulative head-pose frame offset for the turn. Each segment is rendered with
+        # start_frame = this offset so SyncTalk's head-pose walk stays continuous across
+        # the many small segments we now stream (see _queue_wav_segment).
+        self._turn_frame_offset = 0
+        self._first_segment_emitted = False
         self._media_closed = False
         self._first_spoken_chunk_recorded = False
         self.spoken_text = ""
@@ -204,6 +211,8 @@ class ResponseStream:
             return
         sample_rate = int(getattr(self._tts, "sample_rate", 24000) or 24000)
         min_tail_bytes = _pcm_bytes_for_ms(sample_rate, AVATAR_TTS_MIN_SEGMENT_MS)
+        first_seg_bytes = max(min_tail_bytes, _pcm_bytes_for_ms(sample_rate, AVATAR_TTS_FIRST_SEGMENT_MS))
+        seg_bytes = max(min_tail_bytes, _pcm_bytes_for_ms(sample_rate, AVATAR_TTS_SEGMENT_MS))
         buffer = bytearray()
         source_idx = sentence_batch[0][1]
         batch_lang = None
@@ -212,12 +221,18 @@ class ResponseStream:
                 batch_lang = lang
                 break
 
-        # Pre-allocate media index so failures can be signalled to the frontend
-        media_idx = self._media_chunk_idx
-        self._media_chunk_idx += 1
-        self._chunk_count = max(self._chunk_count, media_idx + 1)
-
         sentence_text = " | ".join(s for s, _, _ in sentence_batch if s)
+        segments_emitted = 0
+
+        async def flush_segment(pcm: bytes) -> None:
+            nonlocal segments_emitted
+            if not pcm:
+                return
+            seg_idx = self._media_chunk_idx  # _queue_pcm_segment allocates when media_idx=None
+            _save_tts_chunk_debug(self._turn_id or "", seg_idx, sentence_text, pcm, sample_rate)
+            await self._queue_pcm_segment(pcm, sample_rate, source_idx)
+            self._first_segment_emitted = True
+            segments_emitted += 1
 
         async def prepared_texts():
             for sentence, _, _ in sentence_batch:
@@ -254,18 +269,26 @@ class ResponseStream:
                         bytes=len(pcm),
                     )
                 buffer.extend(pcm)
+                # Flush whole segments as audio streams in so SyncTalk renders them
+                # while TTS is still producing — the small first segment minimises
+                # time-to-first-frame; later segments are larger to limit per-call overhead.
+                target = seg_bytes if self._first_segment_emitted else first_seg_bytes
+                while len(buffer) >= target:
+                    await flush_segment(bytes(buffer[:target]))
+                    del buffer[:target]
+                    target = seg_bytes
+            # Flush the remainder (pad short tails so SyncTalk has enough audio context).
             if buffer:
-                padded = _pad_pcm_tail(bytes(buffer), min_tail_bytes)
-                _save_tts_chunk_debug(self._turn_id or "", media_idx, sentence_text, padded, sample_rate)
-                await self._queue_pcm_segment(padded, sample_rate, source_idx, media_idx=media_idx)
-            else:
-                await self._send_media_error(media_idx, "TTS returned no audio")
+                await flush_segment(_pad_pcm_tail(bytes(buffer), min_tail_bytes))
+            if segments_emitted == 0:
+                await self._send_media_error(self._allocate_media_idx(), "TTS returned no audio")
             log_event(
                 log,
                 "tts_stream_done",
                 request_id=self._turn_id,
                 source_chunk=source_idx,
                 latency_ms=(perf_counter() - started) * 1000,
+                segments=segments_emitted,
             )
         except ClientClosedError:
             raise
@@ -273,7 +296,8 @@ class ResponseStream:
             raise
         except Exception as exc:
             log.exception("streaming TTS/avatar segment failed: source_idx=%s", source_idx)
-            await self._send_media_error(media_idx, f"TTS failed: {exc}")
+            if segments_emitted == 0:
+                await self._send_media_error(self._allocate_media_idx(), f"TTS failed: {exc}")
 
     async def _run_streaming_avatar_worker(self) -> None:
         if self._avatar_queue is None:
@@ -282,7 +306,7 @@ class ResponseStream:
             item = await self._avatar_queue.get()
             if item is None:
                 return
-            media_idx, audio_wav = item
+            media_idx, audio_wav, start_frame = item
             frame_count = 0
             error_sent = False
             started = perf_counter()
@@ -293,6 +317,7 @@ class ResponseStream:
                         audio_wav,
                         priority=0 if media_idx == 0 else 1,
                         chunk_idx=media_idx,
+                        start_frame=start_frame,
                     ):
                         frame_count += 1
                         if frame_count == 1:
@@ -303,7 +328,11 @@ class ResponseStream:
                                 chunk=media_idx,
                                 latency_ms=(perf_counter() - started) * 1000,
                             )
-                        await self._writer.send(self._event({"type": "frame", "data": frame, "chunk": media_idx}))
+                        # SyncTalk yields base64 JPEG; decode here and ship raw bytes as a
+                        # binary WS frame so the browser skips JSON.parse + atob per frame.
+                        await self._writer.send_frame_binary(
+                            media_idx, base64.b64decode(frame), turn_id=self._turn_id
+                        )
             except ClientClosedError:
                 raise
             except asyncio.CancelledError:
@@ -328,15 +357,19 @@ class ResponseStream:
                 except ClientClosedError:
                     pass
 
+    def _allocate_media_idx(self) -> int:
+        media_idx = self._media_chunk_idx
+        self._media_chunk_idx += 1
+        self._chunk_count = max(self._chunk_count, media_idx + 1)
+        return media_idx
+
     async def _queue_pcm_segment(self, pcm: bytes, sample_rate: int, text_idx: int, *, media_idx: int | None = None) -> None:
         if len(pcm) < 2:
             return
         if len(pcm) % 2:
             pcm = pcm[:-1]
         if media_idx is None:
-            media_idx = self._media_chunk_idx
-            self._media_chunk_idx += 1
-            self._chunk_count = max(self._chunk_count, media_idx + 1)
+            media_idx = self._allocate_media_idx()
         audio_wav = pcm_to_wav_bytes(pcm, sample_rate)
         await self._queue_wav_segment(audio_wav, media_idx, text_idx, streaming=True)
 
@@ -344,6 +377,11 @@ class ResponseStream:
         audio_b64 = base64.b64encode(audio_wav).decode("ascii")
         with wave.open(io.BytesIO(audio_wav)) as wf:
             expected_frames = max(1, round(wf.getnframes() / wf.getframerate() * 25))
+        # Assign this segment's head-pose start offset in playback order, then advance
+        # the turn cursor. +2 approximates SyncTalk's audio-feature edge padding so the
+        # next segment resumes near where this one actually ends.
+        start_frame = self._turn_frame_offset
+        self._turn_frame_offset += expected_frames + 2
         try:
             await self._writer.send(
                 self._event(
@@ -359,7 +397,7 @@ class ResponseStream:
                 )
             )
             if self._avatar_queue is not None:
-                self._avatar_queue.put_nowait((media_idx, audio_wav))
+                self._avatar_queue.put_nowait((media_idx, audio_wav, start_frame))
         except ClientClosedError:
             raise
 

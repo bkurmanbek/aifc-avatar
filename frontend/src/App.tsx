@@ -30,6 +30,7 @@ export default function App() {
   const [partialText, setPartialText] = useState('')
   const [inputText, setInputText] = useState('')
   const [isBusy, setIsBusy] = useState(false)
+  const [introActive, setIntroActive] = useState(false)
   const [isListening, setIsListening] = useState(false)
   const [logText, setLogText] = useState('initialising')
   const [logClass, setLogClass] = useState('')
@@ -47,6 +48,7 @@ export default function App() {
 
   // ── Refs ──────────────────────────────────────────────────────
   const idleVidRef = useRef<HTMLVideoElement | null>(null)
+  const introVidRef = useRef<HTMLVideoElement | null>(null)
   const speakCvsRef = useRef<HTMLCanvasElement | null>(null)
   const vadHolderRef = useRef<HTMLDivElement | null>(null)
   const stageStackRef = useRef<HTMLDivElement | null>(null)
@@ -116,6 +118,19 @@ export default function App() {
     return Boolean(turnId && activeTurnIdRef.current !== turnId)
   }, [])
 
+  // Stop and hide the intro MP4 (used on barge-in, interrupt, error, or new turn).
+  const stopIntroVideo = useCallback(() => {
+    const v = introVidRef.current
+    if (v) {
+      v.onended = null
+      v.onerror = null
+      try { v.pause() } catch { /* ignore */ }
+      v.removeAttribute('src')
+      try { v.load() } catch { /* ignore */ }
+    }
+    setIntroActive(false)
+  }, [])
+
   const sendTextPrompt = useCallback((text: string) => {
     setInputText('')
     const sent = sendTextPayload(text)
@@ -144,6 +159,9 @@ export default function App() {
 
   // ── WebSocket ──────────────────────────────────────────────────
   const ws = useWebSocket({
+    onBinaryFrame: (chunk, turnId, jpeg) => {
+      playbackRef.current.onFrameBinary(chunk, turnId, jpeg)
+    },
     onMessage: (msg: WsInbound) => {
       switch (msg.type) {
         case 'session_state':
@@ -178,6 +196,7 @@ export default function App() {
           break
         case 'response_start':
           activeTurnIdRef.current = msg.turn_id ?? null
+          stopIntroVideo()
           playbackRef.current.startStream(msg.turn_id)
           beginAssistantMsg()
           showChatRef.current = true
@@ -241,6 +260,36 @@ export default function App() {
           playbackRef.current.onFrameCache(chunk, msg.url, msg.turn_id)
           break
         }
+        case 'intro_video': {
+          if (isStaleTurn(msg.turn_id)) return
+          const v = introVidRef.current
+          if (!v) break
+          // Hardware-decoded intro clip — bypasses the canvas frame pipeline entirely.
+          setIsBusy(true)
+          isBusyRef.current = true
+          setMode('speaking')
+          setIntroActive(true)
+          const finish = () => {
+            v.onended = null
+            v.onerror = null
+            setIntroActive(false)
+            setMode('idle')
+            setIsBusy(false)
+            isBusyRef.current = false
+            log('intro done', 'ok')
+          }
+          v.onended = finish
+          v.onerror = finish
+          v.src = msg.url
+          v.currentTime = 0
+          v.muted = false
+          v.play().catch(() => {
+            // Autoplay-with-sound blocked — show the clip muted rather than nothing.
+            v.muted = true
+            v.play().catch(finish)
+          })
+          break
+        }
         case 'chunk_done': {
           if (isStaleTurn(msg.turn_id)) return
           const chunk = msg.chunk ?? 0
@@ -275,6 +324,7 @@ export default function App() {
           // Reset VAD state so onSpeechStart will work for the next turn.
           activeTurnIdRef.current = null
           stopPlaybackRef.current()
+          stopIntroVideo()
           isBusyRef.current = false
           setIsBusy(false)
           setMode('idle')
@@ -284,6 +334,7 @@ export default function App() {
         case 'interrupted':
           activeTurnIdRef.current = null
           playbackRef.current.stopPlayback()
+          stopIntroVideo()
           dispatchConversation({ type: 'interrupted' })
           setIsBusy(false)
           setMode('idle')
@@ -296,6 +347,7 @@ export default function App() {
           dispatchConversation({ type: 'interrupted' })
           setIsBusy(false)
           playbackRef.current.stopPlayback()
+          stopIntroVideo()
           setMode('idle')
           log(msg.text, 'err')
           break
@@ -372,7 +424,6 @@ export default function App() {
     setMode,
     log,
     onAllChunksDone: useCallback(() => {
-      dispatchConversation({ type: 'active_spoken_chunk', chunk: null })
       setMode('idle')
       setIsBusy(false)
       isBusyRef.current = false  // Sync so VAD onSpeechStart sees ready state immediately
@@ -381,12 +432,11 @@ export default function App() {
     onFirstFrameRender: useCallback((chunk: number, turnId?: string) => {
       ws.sendWs({ type: 'client_first_render', chunk, turn_id: turnId })
     }, [ws]),
-    onChunkPlaybackStart: useCallback((chunk: number) => {
-      dispatchConversation({ type: 'active_spoken_chunk', chunk })
-    }, []),
-    onChunkPlaybackEnd: useCallback(() => {
-      dispatchConversation({ type: 'active_spoken_chunk', chunk: null })
-    }, []),
+    // NOTE: we intentionally do NOT dispatch per-chunk React state here. With ~20 segments
+    // per answer, dispatching on every chunk start/end forced a top-level re-render at each
+    // boundary — the exact main-thread hitch behind the boundary frame stutter — and the
+    // state it set (activeSpokenChunk) was never read anywhere. The render loop drives the
+    // canvas imperatively; it must not be coupled to React renders.
   })
   const playbackRef = useRef(playback)
 
@@ -859,6 +909,7 @@ export default function App() {
     sendWsRef.current({ type: 'interrupt' })
     activeTurnIdRef.current = null
     stopPlaybackRef.current()
+    stopIntroVideo()
     dispatchConversation({ type: 'interrupted' })
     setIsBusy(false)
     setMode('idle')
@@ -1020,6 +1071,8 @@ export default function App() {
               <AvatarStage
                 fullscreenTargetRef={stageStackRef}
                 idleVideoRef={idleVidRef}
+                introVideoRef={introVidRef}
+                introActive={introActive}
                 speakCanvasRef={speakCvsRef}
                 mode={mode}
                 micEnabled={micEnabled}

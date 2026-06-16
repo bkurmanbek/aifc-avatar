@@ -15,6 +15,8 @@ interface AvatarStageProps {
   showTranscript: boolean
   fullscreenTargetRef: RefObject<HTMLDivElement | null>
   idleVideoRef: RefObject<HTMLVideoElement | null>
+  introVideoRef: RefObject<HTMLVideoElement | null>
+  introActive: boolean
   speakCanvasRef: RefObject<HTMLCanvasElement | null>
   onToggleMic: () => void
   onToggleMute: () => void
@@ -30,6 +32,8 @@ export function AvatarStage({
   showComposer,
   fullscreenTargetRef,
   idleVideoRef,
+  introVideoRef,
+  introActive,
   speakCanvasRef,
   onToggleMic,
   onToggleMute,
@@ -51,6 +55,7 @@ export function AvatarStage({
       <div className={`stage ${mode}`} ref={stageRef}>
         <div className="stage-presence" aria-hidden="true" />
         <video ref={idleVideoRef} id="idleVid" autoPlay loop muted playsInline src={IDLE_VIDEO_SRC} />
+        <video ref={introVideoRef} id="introVid" className={introActive ? 'show' : ''} playsInline />
         <canvas ref={speakCanvasRef} id="speakCvs" width={CANVAS_W} height={CANVAS_H} />
         {AVATAR_LABEL && (
           <div className="stage-overlay">

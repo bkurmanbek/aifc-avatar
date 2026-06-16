@@ -18,6 +18,8 @@ function withIntroToken(rawUrl: string, rawToken: string) {
 
 export interface WsHandlers {
   onMessage: (d: WsInbound) => void
+  /** Binary avatar frame: raw JPEG bytes plus the chunk/turn parsed from the header. */
+  onBinaryFrame?: (chunk: number, turnId: string | undefined, jpeg: ArrayBuffer) => void
   onConnected: () => void
   onDisconnected?: (event: { code?: number; reason?: string; wasClean?: boolean }) => void
   onError?: (event: { source: string; message: string; detail?: unknown }) => void
@@ -136,6 +138,7 @@ export function useWebSocket(handlers: WsHandlers) {
       return
     }
     wsRef.current = ws
+    ws.binaryType = 'arraybuffer'
 
     ws.onopen = () => {
       if (wsRef.current !== ws) {
@@ -182,6 +185,30 @@ export function useWebSocket(handlers: WsHandlers) {
     ws.onmessage = (event) => {
       if (wsRef.current !== ws) {
         console.debug('[websocket] ignoring message from stale socket', { wsUrl })
+        return
+      }
+      // Binary messages are avatar frames (magic 0xF1). Parse the small header and
+      // hand the raw JPEG bytes straight to playback — no JSON, no base64.
+      if (event.data instanceof ArrayBuffer) {
+        try {
+          const buf = event.data
+          const view = new DataView(buf)
+          if (view.byteLength >= 4 && view.getUint8(0) === 0xf1) {
+            const chunk = view.getUint16(1, true)
+            const turnLen = view.getUint8(3)
+            const turnId = turnLen > 0
+              ? new TextDecoder().decode(new Uint8Array(buf, 4, turnLen))
+              : undefined
+            const jpeg = buf.slice(4 + turnLen)
+            handlersRef.current.onBinaryFrame?.(chunk, turnId, jpeg)
+          }
+        } catch (error) {
+          handlersRef.current.onError?.({
+            source: 'websocket.binary_frame',
+            message: 'malformed binary frame ignored',
+            detail: { error },
+          })
+        }
         return
       }
       try {

@@ -13,6 +13,7 @@ export type WsInbound =
   | { type: 'policy_state'; answer_language?: string | null; turn_id?: string }
   | { type: 'audio_ready'; data?: string; audio_url?: string; chunk?: number; frame_stride?: number; turn_id?: string; cached?: boolean; expected_frames?: number }
   | { type: 'frame_cache'; url: string; chunk?: number; turn_id?: string; frame_count?: number }
+  | { type: 'intro_video'; url: string; turn_id?: string }
   | { type: 'frame'; data: string; chunk?: number; turn_id?: string }
   | { type: 'chunk_done'; chunk?: number; turn_id?: string }
   | { type: 'media_error'; text: string; chunk?: number; turn_id?: string }
@@ -40,7 +41,7 @@ export type ChunkState = {
   audio: string | null       // base64 WAV (Q&A path) or '__url__' sentinel (intro path)
   rawBuffer?: ArrayBuffer    // raw WAV bytes from HTTP fetch (intro path — avoids atob cost)
   decodedAudio?: AudioBuffer // pre-decoded AudioBuffer (used when available)
-  frames: string[]
+  frames: (string | Blob)[]  // base64 JPEG (cached/intro JSON path) or Blob (binary WS frames)
   bitmapCache: Record<number, ImageBitmap>  // GPU-ready bitmaps decoded off-thread
   bitmapPending: Set<number>                // frame indices currently being decoded
   frameDone: boolean
@@ -50,4 +51,10 @@ export type ChunkState = {
   frameCacheLoading?: boolean
   error?: boolean
   turnId?: string
+  // Gapless audio scheduling: each chunk's audio is queued onto the AudioContext
+  // timeline back-to-back so mid-sentence segments play without clicks.
+  decoding?: boolean
+  scheduledSource?: AudioBufferSourceNode
+  scheduledT0?: number        // AudioContext time this chunk's audio starts
+  scheduledDuration?: number  // decoded buffer duration (seconds)
 }

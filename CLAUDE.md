@@ -59,7 +59,8 @@ Key settings to know:
 - `EXTERNAL_RAG_URL` / `EXTERNAL_RAG_API_KEY` — external (internal) document RAG endpoint
 - `GEMINI_MODEL=gemini-3.1-flash-lite`
 - `MAX_TTS_CHARS=220` — do NOT lower this; it caps TTS sentences, not the full answer
-- `_AVATAR_WORKER_COUNT = 2` in `response_stream.py` — two parallel SyncTalk workers eliminate gap between chunks
+- `_AVATAR_WORKER_COUNT = 2` in `response_stream.py` — two parallel SyncTalk workers
+- `AVATAR_TTS_FIRST_SEGMENT_MS` / `AVATAR_TTS_SEGMENT_MS` — PCM sub-segment sizes fed to SyncTalk as TTS streams (default 1000 / 1500). Do NOT shrink the first segment to a few-hundred ms — a tiny first chunk renders choppily and forces an instant transition. See "Streaming media pipeline" below.
 
 ---
 
@@ -125,7 +126,21 @@ backend/
 `_SpokenFieldExtractor` in `answer_sources.py` is a streaming JSON state machine that parses the `"spoken"` field out of Gemini's raw JSON output character-by-character as it arrives. This lets TTS start during LLM generation rather than waiting for the full response. It handles all JSON escape sequences including `\uXXXX`.
 
 ### Parallel SyncTalk workers
-`_AVATAR_WORKER_COUNT = 2` in `response_stream.py`. Two workers run concurrently so SyncTalk chunk N+1 starts rendering while chunk N frames are being played. Without this, there is a ~900ms idle gap between spoken sentences.
+`_AVATAR_WORKER_COUNT = 2` in `response_stream.py`. Two workers run concurrently so SyncTalk chunk N+1 starts rendering while chunk N frames are being played.
+
+### Streaming media pipeline (anti-stutter — the big one)
+The realtime answer path was reworked to eliminate stutter and chunk-transition gaps. Four coupled pieces — change them together, not in isolation:
+
+1. **Binary WS frames.** Avatar frames ship as binary WebSocket messages (magic `0xF1` header: `chunk u16 | turn_id_len u8 | turn_id | JPEG`), NOT base64-in-JSON. Backend: `WsWriter.send_frame_binary()`. Frontend: `ws.binaryType='arraybuffer'` → `onBinaryFrame` → `onFrameBinary` stores a `Blob`; `preloadBitmap` does `createImageBitmap(blob)` (no JSON.parse / atob per frame). `ChunkState.frames` is `(string | Blob)[]`.
+
+2. **PCM sub-segmentation.** `_run_streaming_sentence_batch` flushes ~1s (first) / ~1.5s PCM segments to SyncTalk *as TTS streams in*, instead of waiting for the whole sentence — first frame ~9s→~3s. A long answer becomes ~20 small chunks.
+
+3. **SyncTalk continuous head-pose indexing.** `/infer_stream` takes `start_frame`; `_encode_audio` resumes the head-pose ping-pong from that offset instead of restarting at frame 1. `_queue_wav_segment` assigns `start_frame = self._turn_frame_offset` (advanced per segment). Without this, every segment boundary snapped the head back to pose 1. **Requires a SyncTalk restart when `synctalk_server.py` changes** (separate git repo at `/home/admin-aifc/SyncTalk_2D`).
+
+4. **Frontend gapless audio + lead** (`useChunkPlayback.ts`). Each segment's `AudioBufferSource` is scheduled back-to-back on the AudioContext timeline (`audioCursorRef`, `scheduleChunkAudio`/`prescheduleAhead`) so mid-word seams are gapless. `prebufferReady()` builds a `LIVE_PREBUFFER_S` (~2.2s) lead before the first chunk so TTS-realtime production never starves playback (do NOT short-circuit on chunk-0 `frameDone` — that was the recurring-gap bug). Cross-chunk bitmap preload (`CROSS_CHUNK_PRELOAD`) decodes the next chunk's opening frames before the handoff. The canvas render loop is fully decoupled from React — do NOT add per-chunk React dispatches (they re-render at boundaries and cause frame hitches).
+
+### Intro is a prebuilt MP4
+The static intro is a combined H.264+AAC MP4 (`backend/intro.py` `build_intro_video`/`ensure_intro_video`, cached at `cache/intro/video/<avatar>/intro.mp4`), served at `/intro-video/...` and played in a `<video id="introVid">` — hardware-decoded, no per-frame JS. `session.py run_intro` sends `{type:'intro_video',url}` when a valid MP4 exists; falls back to the canvas frame-cache path otherwise. ffmpeg resolves via `_ffmpeg_bin()` (synctalk2d conda env).
 
 ### SyncTalk checkpoint
 Current: `aifc-avatar-5-3min_exp_6` — 5747 frames (229s head cycle), better visual quality than the previous 27s cycle checkpoint. Located at `/home/admin-aifc/SyncTalk_2D/checkpoint/aifc-avatar-5-3min_exp_6/`.

@@ -57,6 +57,8 @@ from ..intro import (
     ensure_intro_audio_file as _ensure_intro_audio_file,
     intro_audio_path as _intro_audio_path,
     intro_frame_cache_info as _intro_frame_cache_info,
+    intro_video_is_valid as _intro_video_is_valid,
+    intro_video_url as _intro_video_url,
     intro_token_in_progress as _intro_token_in_progress,
     intro_token_seen as _intro_token_seen,
     load_intro_blocks as _load_intro_blocks,
@@ -401,9 +403,14 @@ class ClientSession:
             await self.writer.send({"type": "response_start", "turn_id": turn_id})
             await self.writer.send({"type": "status", "turn_id": turn_id, "text": "Starting introduction..."})
             await self.writer.send({"type": "response_chunk", "text": f"{full_text} ", "turn_id": turn_id})
-            for index, block in enumerate(intro_blocks):
-                await self.writer.send({"type": "status", "turn_id": turn_id, "text": f"Streaming cached intro block {index + 1}/{len(intro_blocks)}: {block.key}"})
-                await self._play_intro_block(block, index, turn_id)
+            # Prefer the prebuilt combined MP4 (hardware-decoded, stutter-free). Falls back
+            # to per-block canvas streaming when the video isn't cached yet.
+            if _intro_video_is_valid(intro_blocks):
+                await self.writer.send({"type": "intro_video", "url": _intro_video_url(), "turn_id": turn_id})
+            else:
+                for index, block in enumerate(intro_blocks):
+                    await self.writer.send({"type": "status", "turn_id": turn_id, "text": f"Streaming cached intro block {index + 1}/{len(intro_blocks)}: {block.key}"})
+                    await self._play_intro_block(block, index, turn_id)
             payload = {
                 "answer_id": turn_id,
                 "spoken": full_text,

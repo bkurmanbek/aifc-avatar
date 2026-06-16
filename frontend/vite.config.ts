@@ -35,6 +35,10 @@ export default defineConfig(({ mode }) => {
         '/intro-audio': {
           target: backendHttpTarget,
           changeOrigin: true
+        },
+        '/intro-video': {
+          target: backendHttpTarget,
+          changeOrigin: true
         }
       }
     }

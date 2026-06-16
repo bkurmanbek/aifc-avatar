@@ -22,6 +22,7 @@ class SyncTalkClient:
         audio_wav: bytes,
         priority: int = 1,
         chunk_idx: int = 0,
+        start_frame: int = 0,
     ) -> AsyncGenerator[str, None]:
         async with self._client.stream(
             "POST",
@@ -30,6 +31,7 @@ class SyncTalkClient:
                 "audio_b64": base64.b64encode(audio_wav).decode(),
                 "priority": priority,
                 "chunk_idx": chunk_idx,
+                "start_frame": start_frame,
             },
         ) as response:
             response.raise_for_status()

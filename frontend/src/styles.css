@@ -1237,6 +1237,7 @@ body::after {
 }
 
 #idleVid,
+#introVid,
 #speakCvs {
   position: absolute;
   top: 50%;
@@ -1257,8 +1258,20 @@ body::after {
 }
 #speakCvs { opacity: 0; transition: opacity 180ms ease; }
 
-/* Hide idle video when the speaking canvas is active so they don't overlap */
-.stage:has(#speakCvs.show) #idleVid { opacity: 0; }
+/* Intro MP4: hardware-decoded clip layered above the idle loop while it plays. */
+#introVid {
+  z-index: 2;
+  aspect-ratio: 9 / 16;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 180ms ease;
+  pointer-events: none;
+}
+#introVid.show { opacity: 1; }
+
+/* Hide idle video when the speaking canvas or intro clip is active so they don't overlap */
+.stage:has(#speakCvs.show) #idleVid,
+.stage:has(#introVid.show) #idleVid { opacity: 0; }
 
 @keyframes hold-drift {
   0%,100% { transform: scale(1.000) translateY(0px); }

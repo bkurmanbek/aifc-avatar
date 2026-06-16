@@ -17,9 +17,14 @@ async def main() -> None:
         await ws.send(json.dumps({"type": "text", "text": args.query}))
         frames = 0
         while True:
-            payload = json.loads(await asyncio.wait_for(ws.recv(), timeout=120))
+            raw = await asyncio.wait_for(ws.recv(), timeout=120)
+            # Avatar frames arrive as binary WS messages (magic 0xF1); JSON for everything else.
+            if isinstance(raw, (bytes, bytearray)):
+                frames += 1
+                continue
+            payload = json.loads(raw)
             msg_type = payload.get("type")
-            if msg_type == "frame":
+            if msg_type == "frame":  # legacy JSON frame path (intro fallback / cached)
                 frames += 1
                 continue
             print(msg_type, {k: v for k, v in payload.items() if k != "data"})

@@ -3,9 +3,20 @@ import type { ChunkState } from '../types'
 import { FPS, CANVAS_W, CANVAS_H } from '../constants'
 
 const LIVE_FRAME_HEADROOM_S = 0.14
-const LIVE_READY_FRAME_HEADROOM = 4
+const LIVE_READY_FRAME_HEADROOM = 10
 const CACHED_READY_FRAME_HEADROOM = 32
 const PRELOAD_FRAME_WINDOW = 48
+// Frames of the NEXT chunk to decode during the tail of the current chunk, so the boundary
+// handoff finds them GPU-ready. Narrow so it doesn't steal decode bandwidth from the tail.
+const CROSS_CHUNK_PRELOAD = 12
+// Build a startup lead (seconds of buffered audio) before the first live chunk plays.
+// TTS streams at ~realtime, so playback consumes audio as fast as it's produced; without
+// a lead, playback races production and starves whenever SyncTalk render jitters, causing
+// recurring transition gaps. The lead must exceed (max segment duration + render margin)
+// so the next segment is always ready before the current one ends.
+const LIVE_PREBUFFER_S = 2.2
+// How many chunks ahead of the playing one we pre-schedule audio for (gapless seams).
+const AUDIO_SCHEDULE_LOOKAHEAD = 6
 const FRAME_CACHE_INITIAL_LIMIT = 48
 const FRAME_CACHE_NEXT_LIMIT = 24
 const FRAME_CACHE_FETCH_TIMEOUT_MS = 8000
@@ -33,6 +44,12 @@ export function useChunkPlayback(
   const currentSrcRef = useRef<AudioBufferSourceNode | null>(null)
   const renderActiveRef = useRef(false)
   const isPlayingRef = useRef(false)
+  // Gapless audio scheduling state
+  const audioCursorRef = useRef(0)            // next AudioContext start time
+  const scheduledSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set())
+  const highestScheduledRef = useRef(-1)      // highest chunk idx whose audio is scheduled
+  const playbackStartedRef = useRef(false)    // first live chunk has begun (prebuffer satisfied)
+  const prescheduleAheadRef = useRef<() => void>(() => {})
   const hideSpeakTimerRef = useRef<number | null>(null)
   const chunkGapTimerRef = useRef<number | null>(null)
   const streamActiveRef = useRef(false)
@@ -64,16 +81,27 @@ export function useChunkPlayback(
     }
   }, [])
 
+  // Tracks whether the canvas is currently shown so the per-frame render loop can
+  // call showSpeak() without re-writing inline styles every frame. Writing
+  // c.style.opacity + classList each of the 25 frames/sec forces the browser to
+  // re-evaluate the `:has(#speakCvs.show)` selector and recalc styles on the main
+  // thread every frame, stealing time from the render loop. Only touch the DOM on
+  // the actual hidden→shown transition.
+  const speakShownRef = useRef(false)
+
   const showSpeak = useCallback(() => {
+    if (speakShownRef.current) return
     const c = speakCvsRef.current
     if (!c) return
     c.classList.add('show')
     c.style.opacity = '1'
+    speakShownRef.current = true
   }, [speakCvsRef])
 
   const hideSpeak = useCallback(() => {
     const c = speakCvsRef.current
     if (!c) return
+    speakShownRef.current = false
     c.style.opacity = '0'
     c.classList.remove('show') // Remove immediately so :has() CSS triggers idle video fade-in at once
     window.setTimeout(() => {
@@ -89,6 +117,30 @@ export function useChunkPlayback(
     }, delayMs)
   }, [hideSpeak])
 
+  // Stop every audio source scheduled on the timeline (gapless playback queues sources
+  // ahead of the playhead, so an interrupt must cancel all of them) and reset the cursor.
+  const stopAllScheduledAudio = useCallback(() => {
+    for (const src of scheduledSourcesRef.current) {
+      src.onended = null
+      try { src.stop() } catch { /* ignore */ }
+    }
+    scheduledSourcesRef.current.clear()
+    audioCursorRef.current = 0
+    highestScheduledRef.current = -1
+    playbackStartedRef.current = false
+  }, [])
+
+  // Close every decoded ImageBitmap across all chunks so GPU memory is released
+  // immediately on reset rather than waiting for GC to finalize the bitmaps.
+  const releaseAllBitmaps = useCallback(() => {
+    for (const key of Object.keys(chunksRef.current)) {
+      const ch = chunksRef.current[Number(key)]
+      if (!ch) continue
+      for (const fi of Object.keys(ch.bitmapCache)) ch.bitmapCache[Number(fi)]?.close?.()
+      ch.bitmapCache = {}
+    }
+  }, [])
+
   const stopPlayback = useCallback(() => {
     playbackSessionRef.current += 1
     renderActiveRef.current = false
@@ -103,8 +155,10 @@ export function useChunkPlayback(
       try { currentSrcRef.current.stop() } catch { /* ignore */ }
       currentSrcRef.current = null
     }
+    stopAllScheduledAudio()
     for (const controller of frameCacheControllersRef.current) controller.abort()
     frameCacheControllersRef.current.clear()
+    releaseAllBitmaps()
     chunksRef.current = {}
     nextPlayChunkRef.current = 0
     totalChunksRef.current = Infinity
@@ -112,7 +166,7 @@ export function useChunkPlayback(
     chunkEndTsRef.current = {}
     activeTurnIdRef.current = null
     hideSpeak()
-  }, [hideSpeak])
+  }, [hideSpeak, releaseAllBitmaps, stopAllScheduledAudio])
 
   const isStaleTurn = useCallback((turnId?: string) => {
     return Boolean(turnId && activeTurnIdRef.current !== turnId)
@@ -122,18 +176,61 @@ export function useChunkPlayback(
     if (!chunksRef.current[idx]) chunksRef.current[idx] = { audio: null, frames: [], bitmapCache: {}, bitmapPending: new Set(), frameDone: false, frameStride: 1 }
   }, [])
 
-  // Decode one JPEG frame off-thread via createImageBitmap and cache the GPU bitmap
+  // Decode one JPEG frame off-thread via createImageBitmap and cache the GPU bitmap.
+  // We decode the base64 into a Blob and pass that to createImageBitmap rather than
+  // an HTMLImageElement: createImageBitmap(img) rejects with InvalidStateError when the
+  // image hasn't finished loading (which it never has, synchronously after setting src),
+  // so the Image path silently failed to populate the cache and every frame stuttered.
+  // createImageBitmap(blob) decodes fully off the main thread with no load race.
   const preloadBitmap = useCallback((ch: ChunkState, frameIdx: number) => {
-    if (ch.bitmapCache[frameIdx] || ch.bitmapPending.has(frameIdx) || !ch.frames[frameIdx]) return
+    const frame = ch.frames[frameIdx]
+    if (ch.bitmapCache[frameIdx] || ch.bitmapPending.has(frameIdx) || !frame) return
     ch.bitmapPending.add(frameIdx)
-    const img = new Image()
-    img.src = `data:image/jpeg;base64,${ch.frames[frameIdx]}`
-    createImageBitmap(img).then(bitmap => {
+    let blob: Blob
+    if (frame instanceof Blob) {
+      // Binary WS frame — already raw JPEG bytes, no base64 decode needed.
+      blob = frame
+    } else {
+      try {
+        const binary = atob(frame)
+        const bytes = new Uint8Array(binary.length)
+        for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+        blob = new Blob([bytes], { type: 'image/jpeg' })
+      } catch {
+        ch.bitmapPending.delete(frameIdx)
+        return
+      }
+    }
+    createImageBitmap(blob).then(bitmap => {
       ch.bitmapPending.delete(frameIdx)
       ch.bitmapCache[frameIdx] = bitmap
     }).catch(() => {
       ch.bitmapPending.delete(frameIdx)
     })
+  }, [])
+
+  // Decode a frame's bitmap and await it. Used to guarantee the first frame(s) of a
+  // chunk are GPU-ready before its render loop starts, so playback doesn't open with a
+  // stutter while createImageBitmap is still in flight.
+  const ensureBitmapReady = useCallback(async (ch: ChunkState, frameIdx: number) => {
+    if (ch.bitmapCache[frameIdx]) return
+    const frame = ch.frames[frameIdx]
+    if (!frame) return
+    try {
+      let blob: Blob
+      if (frame instanceof Blob) {
+        blob = frame
+      } else {
+        const binary = atob(frame)
+        const bytes = new Uint8Array(binary.length)
+        for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+        blob = new Blob([bytes], { type: 'image/jpeg' })
+      }
+      const bitmap = await createImageBitmap(blob)
+      ch.bitmapPending.delete(frameIdx)
+      if (ch.bitmapCache[frameIdx]) bitmap.close?.()
+      else ch.bitmapCache[frameIdx] = bitmap
+    } catch { /* render loop will retry via preloadBitmap */ }
   }, [])
 
   const isChunkReadyToPlay = useCallback((_idx: number, ch: ChunkState | undefined) => {
@@ -144,6 +241,101 @@ export function useChunkPlayback(
     if (ch.frameDone && ch.frames.length > 0) return true
     return false
   }, [])
+
+  // Decode a chunk's WAV to an AudioBuffer off the critical path (idempotent).
+  const ensureDecoded = useCallback((ch: ChunkState) => {
+    if (ch.decodedAudio || ch.decoding) return
+    const ac = acRef.current
+    if (!ac || ac.state !== 'running') return
+    const session = playbackSessionRef.current
+    const finish = (buf: AudioBuffer | null) => {
+      ch.decoding = false
+      if (session !== playbackSessionRef.current) return
+      if (buf) {
+        ch.decodedAudio = buf
+        prescheduleAheadRef.current()
+      }
+    }
+    try {
+      if (ch.rawBuffer) {
+        ch.decoding = true
+        ac.decodeAudioData(ch.rawBuffer.slice(0)).then(finish).catch(() => finish(null))
+      } else if (ch.audio && ch.audio !== '__url__') {
+        ch.decoding = true
+        const bytes = Uint8Array.from(atob(ch.audio), (c) => c.charCodeAt(0))
+        ac.decodeAudioData(bytes.buffer).then(finish).catch(() => finish(null))
+      }
+    } catch {
+      ch.decoding = false
+    }
+  }, [])
+
+  // Queue a chunk's audio onto the AudioContext timeline immediately after the previous
+  // chunk's audio (audioCursorRef). Starting sources ahead of the playhead is what makes
+  // mid-sentence segment seams gapless. Returns true once the chunk's audio is scheduled.
+  const scheduleChunkAudio = useCallback((idx: number): boolean => {
+    const ch = chunksRef.current[idx]
+    const ac = acRef.current
+    if (!ch || !ac || ac.state !== 'running') return false
+    if (ch.scheduledSource) return true
+    if (!ch.decodedAudio) { ensureDecoded(ch); return false }
+    const buf = ch.decodedAudio
+    const cursor = audioCursorRef.current
+    const t0 = cursor > ac.currentTime + 0.02 ? cursor : ac.currentTime + 0.08
+    const src = ac.createBufferSource()
+    src.buffer = buf
+    src.connect(ac.destination)
+    try { src.start(t0) } catch { return false }
+    ch.scheduledSource = src
+    ch.scheduledT0 = t0
+    ch.scheduledDuration = buf.duration
+    audioCursorRef.current = t0 + buf.duration
+    highestScheduledRef.current = Math.max(highestScheduledRef.current, idx)
+    scheduledSourcesRef.current.add(src)
+    src.onended = () => { scheduledSourcesRef.current.delete(src) }
+    return true
+  }, [ensureDecoded])
+
+  // Fill the audio timeline ahead of the playhead with upcoming contiguous ready chunks.
+  const prescheduleAhead = useCallback(() => {
+    if (!playbackStartedRef.current) return
+    let idx = highestScheduledRef.current + 1
+    const limit = highestScheduledRef.current + AUDIO_SCHEDULE_LOOKAHEAD
+    while (idx <= limit && idx < totalChunksRef.current) {
+      const ch = chunksRef.current[idx]
+      if (!isChunkReadyToPlay(idx, ch)) {
+        if (ch) ensureDecoded(ch)
+        break
+      }
+      if (!scheduleChunkAudio(idx)) break
+      idx += 1
+    }
+  }, [isChunkReadyToPlay, scheduleChunkAudio, ensureDecoded])
+
+  useEffect(() => { prescheduleAheadRef.current = prescheduleAhead }, [prescheduleAhead])
+
+  // Startup gate: only begin the first live chunk once enough audio is buffered that the
+  // next segment will always be ready before the current one ends (prevents gaps).
+  const prebufferReady = useCallback(() => {
+    const first = chunksRef.current[0]
+    if (!first) return false
+    if (first.cached) return true            // cached/intro path manages its own headroom
+    // Sum the audio duration of contiguous ready chunks from 0. NOTE: we deliberately do
+    // NOT short-circuit on chunk 0 being frameDone — chunk 0 is a ~1s segment that finishes
+    // rendering almost immediately, and starting then would leave a near-zero lead (the
+    // root cause of recurring chunk-transition gaps). We require a real time lead instead.
+    let seconds = 0
+    let i = 0
+    for (; ; i += 1) {
+      const ch = chunksRef.current[i]
+      if (!isChunkReadyToPlay(i, ch)) break
+      const frameCount = ch.frameDone ? ch.frames.length : (ch.expectedFrames ?? ch.frames.length)
+      seconds += frameCount / FPS
+    }
+    // Whole turn already delivered and contiguous-ready → start now (short answers).
+    if (totalChunksRef.current !== Infinity && i >= totalChunksRef.current) return true
+    return seconds >= LIVE_PREBUFFER_S
+  }, [isChunkReadyToPlay])
 
   const chunkDone = useCallback((idx: number) => {
     renderActiveRef.current = false
@@ -169,21 +361,22 @@ export function useChunkPlayback(
 
   const maybePlayNext = useCallback(() => {
     if (isPlayingRef.current) return
-    const ch = chunksRef.current[nextPlayChunkRef.current]
-    if (isChunkReadyToPlay(nextPlayChunkRef.current, ch)) {
-      if (chunkGapTimerRef.current) window.clearTimeout(chunkGapTimerRef.current)
-      playChunkRef.current(nextPlayChunkRef.current)
-    }
-  }, [isChunkReadyToPlay])
+    const idx = nextPlayChunkRef.current
+    const ch = chunksRef.current[idx]
+    if (!isChunkReadyToPlay(idx, ch)) return
+    // First live chunk waits for the startup prebuffer; later chunks play as soon as ready.
+    if (!playbackStartedRef.current && idx === 0 && !ch?.cached && !prebufferReady()) return
+    if (chunkGapTimerRef.current) window.clearTimeout(chunkGapTimerRef.current)
+    playChunkRef.current(idx)
+  }, [isChunkReadyToPlay, prebufferReady])
 
   const playChunk = useCallback(async (idx: number) => {
     const playbackSession = playbackSessionRef.current
     const ch = chunksRef.current[idx]
     if (!ch?.audio) return
+    // Claim playback synchronously to prevent a concurrent maybePlayNext (e.g. from an
+    // incoming frame) from re-entering playChunk for the same idx during the awaits below.
     isPlayingRef.current = true
-    cbRef.current.onChunkPlaybackStart?.(idx)
-    cbRef.current.setMode('speaking')
-    if (hideSpeakTimerRef.current) window.clearTimeout(hideSpeakTimerRef.current)
 
     if (!acRef.current) acRef.current = new AudioContext()
     if (acRef.current.state === 'suspended') {
@@ -199,56 +392,62 @@ export function useChunkPlayback(
       return
     }
 
-    let buf: AudioBuffer
-    try {
-      if (ch.decodedAudio) {
-        buf = ch.decodedAudio
-      } else if (ch.rawBuffer) {
-        // Intro path: WAV fetched via HTTP as ArrayBuffer — no atob conversion needed
-        buf = await acRef.current.decodeAudioData(ch.rawBuffer.slice(0))
-      } else {
-        const bytes = Uint8Array.from(atob(ch.audio), (c) => c.charCodeAt(0))
-        buf = await acRef.current.decodeAudioData(bytes.buffer)
+    // Ensure this chunk's audio is decoded (it usually was pre-decoded on arrival).
+    if (!ch.decodedAudio) {
+      try {
+        if (ch.rawBuffer) {
+          ch.decodedAudio = await acRef.current.decodeAudioData(ch.rawBuffer.slice(0))
+        } else if (ch.audio !== '__url__') {
+          const bytes = Uint8Array.from(atob(ch.audio), (c) => c.charCodeAt(0))
+          ch.decodedAudio = await acRef.current.decodeAudioData(bytes.buffer)
+        }
+      } catch (e) {
+        cbRef.current.log(`audio decode err: ${(e as Error).message}`, 'err')
+        chunkDone(idx)
+        return
       }
-    } catch (e) {
-      cbRef.current.log(`audio decode err: ${(e as Error).message}`, 'err')
-      chunkDone(idx)
-      return
     }
     if (playbackSession !== playbackSessionRef.current) return
+    const buf = ch.decodedAudio
+    if (!buf) { chunkDone(idx); return }
 
-    if (currentSrcRef.current) {
-      currentSrcRef.current.onended = null
-      try { currentSrcRef.current.stop() } catch { /* ignore */ }
-    }
+    playbackStartedRef.current = true
+    renderActiveRef.current = true
+    cbRef.current.onChunkPlaybackStart?.(idx)
+    cbRef.current.setMode('speaking')
+    if (hideSpeakTimerRef.current) window.clearTimeout(hideSpeakTimerRef.current)
 
     const cvs = speakCvsRef.current
     const ctx = cvs?.getContext('2d')
-    if (!ctx || !cvs) {
-      const src = acRef.current.createBufferSource()
-      src.buffer = buf
-      currentSrcRef.current = src
-      src.connect(acRef.current.destination)
-      src.onended = () => chunkDone(idx)
-      src.start(acRef.current.currentTime)
-      return
+    const wasPreScheduled = !!ch.scheduledSource
+
+    // Kick off bitmap decode for the opening window; render loop extends this progressively.
+    if (ctx && cvs) {
+      for (let i = 0; i < Math.min(PRELOAD_FRAME_WINDOW, ch.frames.length); i += 1) preloadBitmap(ch, i)
     }
 
-    // Kick off bitmap decode for the first window; render loop extends this progressively
-    for (let i = 0; i < Math.min(PRELOAD_FRAME_WINDOW, ch.frames.length); i += 1) preloadBitmap(ch, i)
-    if (playbackSession !== playbackSessionRef.current) return
+    // Cold start (chunk 0 / not pre-scheduled): decode the opening frames BEFORE scheduling
+    // audio, so audio t0 aligns with frame 0 being ready. If we scheduled audio first and then
+    // awaited, the audio would advance during the cold decode and the render loop would skip
+    // past the very frames we just decoded → an opening stutter. Gapless chunks are already
+    // scheduled and their opening bitmaps were preloaded during the previous chunk, so we must
+    // NOT block here — blocking a fixed-timeline chunk only desyncs the handoff.
+    if (ctx && cvs && !wasPreScheduled) {
+      await Promise.all([ensureBitmapReady(ch, 0), ensureBitmapReady(ch, 1), ensureBitmapReady(ch, 2)])
+      if (playbackSession !== playbackSessionRef.current) return
+    }
 
-    const src = acRef.current.createBufferSource()
-    src.buffer = buf
-    currentSrcRef.current = src
-    const ana = acRef.current.createAnalyser()
-    ana.fftSize = 32
-    src.connect(ana)
-    src.connect(acRef.current.destination)
-    const t0 = acRef.current.currentTime + 0.02
-    src.start(t0)
+    if (!ch.scheduledSource) scheduleChunkAudio(idx)
+    const t0 = ch.scheduledT0 ?? (acRef.current.currentTime + 0.05)
+    const chunkDuration = ch.scheduledDuration ?? buf.duration
+    prescheduleAhead()
 
-    renderActiveRef.current = true
+    if (!ctx || !cvs) {
+      // No canvas: audio is already scheduled; end the chunk when its audio finishes.
+      const ms = Math.max(0, (t0 + chunkDuration - acRef.current.currentTime) * 1000)
+      window.setTimeout(() => { if (playbackSession === playbackSessionRef.current) chunkDone(idx) }, ms)
+      return
+    }
 
     let chunkDoneCalled = false
     const callChunkDone = () => {
@@ -259,11 +458,27 @@ export function useChunkPlayback(
         chunkDone(idx)
       }
     }
-    src.onended = callChunkDone
 
     let last = -1
+    let lastEvicted = -1
     let renderStartedAt = 0
     let lastDrawTs = 0
+    // Playback is strictly forward-only, so once we've drawn past a frame we never
+    // need its bitmap again. Free it promptly: keeping every decoded ImageBitmap for
+    // the whole chunk (e.g. 548 intro frames × several MB each) builds up hundreds of
+    // MB of GPU memory and the resulting GC/allocation churn causes periodic ~60-80ms
+    // hitches. Keep a tiny trailing margin behind the playhead.
+    const EVICT_BEHIND = 4
+    const evictPlayed = (upToExclusive: number) => {
+      for (let i = lastEvicted + 1; i < upToExclusive; i += 1) {
+        const b = ch.bitmapCache[i]
+        if (b) {
+          b.close?.()
+          delete ch.bitmapCache[i]
+        }
+      }
+      if (upToExclusive - 1 > lastEvicted) lastEvicted = upToExclusive - 1
+    }
     // Instrumentation — accessible in devtools as window.__avatarPerf
     const perf: { t: number; fi: number; gap?: number; note?: string }[] = []
     ;(window as Record<string, unknown>).__avatarPerf ??= []
@@ -275,7 +490,7 @@ export function useChunkPlayback(
       const frameCount = ch.frames.length
       const knownTotal = ch.frameDone ? frameCount : (ch.expectedFrames ?? 0)
       const effectiveFps = knownTotal > 1
-        ? (knownTotal - 1) / Math.max(0.001, buf.duration)
+        ? (knownTotal - 1) / Math.max(0.001, chunkDuration)
         : Math.max(
             1,
             Math.min(
@@ -290,6 +505,17 @@ export function useChunkPlayback(
       // Trigger bitmap decode for upcoming frames (progressive, never bulk)
       if (displayIndex >= 0) {
         for (let i = displayIndex; i < Math.min(displayIndex + PRELOAD_FRAME_WINDOW, frameCount); i += 1) preloadBitmap(ch, i)
+        // Cross-chunk lookahead: in the last ~0.5s of this chunk, decode the NEXT chunk's
+        // opening frames so the boundary handoff finds them already GPU-ready (the per-chunk
+        // window above never spans into the next chunk, which caused the start-of-chunk
+        // stutter). Kept narrow so it doesn't steal decode bandwidth from this chunk's tail.
+        const remaining = frameCount - 1 - displayIndex
+        if (remaining < CROSS_CHUNK_PRELOAD) {
+          const nextCh = chunksRef.current[idx + 1]
+          if (nextCh) {
+            for (let i = 0; i < Math.min(CROSS_CHUNK_PRELOAD, nextCh.frames.length); i += 1) preloadBitmap(nextCh, i)
+          }
+        }
       }
       const bitmap = displayIndex >= 0 ? ch.bitmapCache[displayIndex] : undefined
       const now = performance.now()
@@ -305,6 +531,7 @@ export function useChunkPlayback(
         showSpeak()
         ctx.drawImage(bitmap, 0, 0, CANVAS_W, CANVAS_H)
         last = displayIndex
+        evictPlayed(displayIndex - EVICT_BEHIND)
         if (renderStartedAt === 0) {
           renderStartedAt = now
           const key = `${ch.turnId ?? ''}:${idx}`
@@ -329,11 +556,14 @@ export function useChunkPlayback(
         perf.push({ t: now, fi: displayIndex, gap: Math.round(now - lastDrawTs), note: 'BITMAP_NOT_READY' })
         console.warn(`[avatar] chunk=${idx} bitmap ${displayIndex} not ready, gap=${Math.round(now - lastDrawTs)}ms`)
       }
-      if (elapsed < buf.duration + 0.2) requestAnimationFrame(loop)
+      // Hand off exactly at the audio boundary — the next chunk's audio is already
+      // scheduled at t0+chunkDuration, so starting its render loop now keeps both
+      // audio and frames gapless.
+      if (elapsed < chunkDuration) requestAnimationFrame(loop)
       else callChunkDone()
     }
     requestAnimationFrame(loop)
-  }, [speakCvsRef, showSpeak, chunkDone, preloadBitmap])
+  }, [speakCvsRef, showSpeak, chunkDone, preloadBitmap, ensureBitmapReady, scheduleChunkAudio, prescheduleAhead])
 
   useEffect(() => {
     playChunkRef.current = playChunk
@@ -360,9 +590,11 @@ export function useChunkPlayback(
       acRef.current.decodeAudioData(bytes.buffer.slice(0)).then((buf) => {
         if (playbackSession !== playbackSessionRef.current || isStaleTurn(turnId)) return
         if (chunksRef.current[idx]) chunksRef.current[idx].decodedAudio = buf
+        prescheduleAheadRef.current()  // queue this chunk's audio onto the timeline if it's next
       }).catch(() => { /* will retry in playChunk */ })
     }
     maybePlayNext()
+    prescheduleAheadRef.current()
   }, [ensureChunk, isStaleTurn, maybePlayNext])
 
   // Used for intro audio served via HTTP URL — fetches WAV as ArrayBuffer (no atob overhead)
@@ -412,6 +644,21 @@ export function useChunkPlayback(
     ch.frames.push(b64)
     preloadBitmap(ch, frameIdx)
     if (idx === nextPlayChunkRef.current) maybePlayNext()
+    prescheduleAheadRef.current()  // upcoming chunk may now have enough frames to schedule
+  }, [ensureChunk, isStaleTurn, maybePlayNext, preloadBitmap])
+
+  // Binary WS frame — store the raw JPEG bytes as a Blob; preloadBitmap decodes it
+  // directly via createImageBitmap with no base64/JSON cost on the main thread.
+  const onFrameBinary = useCallback((idx: number, turnId: string | undefined, jpeg: ArrayBuffer) => {
+    if (isStaleTurn(turnId)) return
+    ensureChunk(idx)
+    if (turnId) chunksRef.current[idx].turnId = turnId
+    const ch = chunksRef.current[idx]
+    const frameIdx = ch.frames.length
+    ch.frames.push(new Blob([jpeg], { type: 'image/jpeg' }))
+    preloadBitmap(ch, frameIdx)
+    if (idx === nextPlayChunkRef.current) maybePlayNext()
+    prescheduleAheadRef.current()  // upcoming chunk may now have enough frames to schedule
   }, [ensureChunk, isStaleTurn, maybePlayNext, preloadBitmap])
 
   const onFrameCache = useCallback((idx: number, url: string, turnId?: string) => {
@@ -493,6 +740,7 @@ export function useChunkPlayback(
     if (turnId) chunksRef.current[idx].turnId = turnId
     chunksRef.current[idx].frameDone = true
     maybePlayNext()
+    prescheduleAheadRef.current()
   }, [ensureChunk, isStaleTurn, maybePlayNext])
 
   const onChunkError = useCallback((idx: number, turnId?: string) => {
@@ -523,15 +771,17 @@ export function useChunkPlayback(
       try { currentSrcRef.current.stop() } catch { /* ignore */ }
       currentSrcRef.current = null
     }
+    stopAllScheduledAudio()
     for (const controller of frameCacheControllersRef.current) controller.abort()
     frameCacheControllersRef.current.clear()
     if (chunkGapTimerRef.current) window.clearTimeout(chunkGapTimerRef.current)
+    releaseAllBitmaps()
     chunksRef.current = {}
     nextPlayChunkRef.current = 0
     totalChunksRef.current = Infinity
     firstRenderReportedRef.current = {}
     activeTurnIdRef.current = turnId ?? null
-  }, [])
+  }, [releaseAllBitmaps, stopAllScheduledAudio])
 
   const setStreamActive = useCallback((active: boolean) => {
     streamActiveRef.current = active
@@ -544,6 +794,7 @@ export function useChunkPlayback(
     onAudioReadyUrl,
     onFrameCache,
     onFrame,
+    onFrameBinary,
     onChunkDone,
     onChunkError,
     onAllDone,

@@ -88,8 +88,11 @@ TTS_PREWARM_QUERY_WAIT_S = env_float("TTS_PREWARM_QUERY_WAIT_S", 2.5)
 SONIOX_TTS_STREAM_TIMEOUT_S = env_float("SONIOX_TTS_STREAM_TIMEOUT_S", 30.0)
 SONIOX_TTS_FORCE_IPV4 = env_bool("SONIOX_TTS_FORCE_IPV4", True)
 SONIOX_TTS_STREAMING_AVATAR = env_bool("SONIOX_TTS_STREAMING_AVATAR", True)
-AVATAR_TTS_FIRST_SEGMENT_MS = env_int("AVATAR_TTS_FIRST_SEGMENT_MS", 220)
-AVATAR_TTS_SEGMENT_MS = env_int("AVATAR_TTS_SEGMENT_MS", 2500)
+# Sub-segment sizes for streaming PCM into SyncTalk while TTS is still producing.
+# Smaller first segment → faster time-to-first-frame; ~2s thereafter limits per-call
+# overhead. Continuous head-pose indexing keeps seams between these segments seamless.
+AVATAR_TTS_FIRST_SEGMENT_MS = env_int("AVATAR_TTS_FIRST_SEGMENT_MS", 1000)
+AVATAR_TTS_SEGMENT_MS = env_int("AVATAR_TTS_SEGMENT_MS", 2000)
 AVATAR_TTS_MIN_SEGMENT_MS = env_int("AVATAR_TTS_MIN_SEGMENT_MS", 220)
 AVATAR_TTS_MAX_SEGMENT_MS = env_int("AVATAR_TTS_MAX_SEGMENT_MS", 3000)
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")

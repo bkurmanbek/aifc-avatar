@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
+import io
 import json
 import logging
 import re
+import shutil
+import subprocess
+import sys
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -352,6 +358,170 @@ async def ensure_intro_audio_file(tts: SonioxRealtimeTTS, block: IntroBlock) -> 
         return audio_wav
 
 
+# ── Intro video (MP4) ────────────────────────────────────────
+# The intro is static and identical every session, so the ideal delivery is a single
+# hardware-decoded MP4 rather than hundreds of base64 JPEGs the browser must JSON-parse,
+# atob, and createImageBitmap at 25fps. We concatenate all blocks' cached frames + audio
+# into one clip, cached on disk, served via /intro-video and played in a <video> element.
+
+
+def _ffmpeg_bin() -> str:
+    import os
+    override = os.getenv("FFMPEG_BIN")
+    if override and Path(override).exists():
+        return override
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    # ffmpeg lives in the synctalk2d conda env; the backend may run under a different
+    # interpreter, so probe known locations rather than relying on PATH alone.
+    for candidate in (
+        Path(sys.executable).parent / "ffmpeg",
+        Path("/home/admin-aifc/miniforge3/envs/synctalk2d/bin/ffmpeg"),
+    ):
+        if candidate.exists():
+            return str(candidate)
+    return "ffmpeg"
+
+
+def intro_video_path() -> Path:
+    return INTRO_AUDIO_CACHE_DIR / "video" / safe_cache_key(INTRO_AVATAR_CACHE_KEY) / "intro.mp4"
+
+
+def _intro_video_meta_path() -> Path:
+    return intro_video_path().with_suffix(".mp4.json")
+
+
+def intro_video_url() -> str:
+    return f"/intro-video/{safe_cache_key(INTRO_AVATAR_CACHE_KEY)}/intro.mp4"
+
+
+def intro_video_signature(blocks: list[IntroBlock]) -> str:
+    payload = {
+        "cache_version": 1,
+        "fps": 25,
+        "avatar": INTRO_AVATAR_CACHE_KEY,
+        "blocks": [{"key": b.key, "sig": intro_frame_signature(b)} for b in blocks],
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def intro_video_is_valid(blocks: list[IntroBlock]) -> bool:
+    path = intro_video_path()
+    meta_path = _intro_video_meta_path()
+    if not (path.exists() and path.stat().st_size > 0 and meta_path.exists()):
+        return False
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return meta.get("signature") == intro_video_signature(blocks)
+
+
+def _concat_block_wavs(blocks: list[IntroBlock]) -> bytes:
+    """Concatenate all blocks' cached intro WAVs (identical TTS format) into one WAV."""
+    out = io.BytesIO()
+    writer: wave.Wave_write | None = None
+    try:
+        for block in blocks:
+            with wave.open(str(intro_audio_path(block)), "rb") as wf:
+                if writer is None:
+                    writer = wave.open(out, "wb")
+                    writer.setparams(wf.getparams())
+                writer.writeframes(wf.readframes(wf.getnframes()))
+    finally:
+        if writer is not None:
+            writer.close()
+    return out.getvalue()
+
+
+def _tail_text(path: Path, limit: int = 600) -> str:
+    try:
+        return path.read_bytes()[-limit:].decode("utf-8", "ignore")
+    except Exception:
+        return ""
+
+
+def build_intro_video(blocks: list[IntroBlock]) -> Path | None:
+    """Build (or rebuild) the combined intro MP4 from cached frames + audio. Blocking."""
+    if not blocks:
+        return None
+    frames_all: list[str] = []
+    for block in blocks:
+        frames = load_intro_frames_from_cache(block)
+        if not frames or not intro_audio_path(block).exists():
+            log.warning("intro video build skipped: missing cache for block=%s", block.key)
+            return None
+        frames_all.extend(frames)
+    if not frames_all:
+        return None
+
+    out_path = intro_video_path()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_audio = out_path.with_suffix(".audio.wav")
+    tmp_out = out_path.with_suffix(".mp4.tmp")
+    tmp_err = out_path.with_suffix(".ffmpeg.log")
+    tmp_audio.write_bytes(_concat_block_wavs(blocks))
+
+    cmd = [
+        _ffmpeg_bin(), "-y",
+        "-f", "image2pipe", "-framerate", "25", "-i", "pipe:0",
+        "-i", str(tmp_audio),
+        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        "-shortest", "-movflags", "+faststart",
+        "-f", "mp4",  # tmp_out ends in .mp4.tmp; ffmpeg can't infer the muxer from that
+        str(tmp_out),
+    ]
+    # ffmpeg stderr goes to a file, never PIPE: we stream ~250MB of JPEG bytes to stdin
+    # on this thread, and a full stderr pipe buffer would stall ffmpeg and deadlock the write.
+    ret = -1
+    try:
+        with open(tmp_err, "wb") as err:
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err)
+            assert proc.stdin is not None
+            try:
+                for frame in frames_all:
+                    proc.stdin.write(base64.b64decode(frame))
+                proc.stdin.close()
+                ret = proc.wait(timeout=300)
+            except Exception:
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=10)
+                raise
+    except Exception:
+        log.exception("intro video ffmpeg failed: %s", _tail_text(tmp_err))
+        for path in (tmp_audio, tmp_out, tmp_err):
+            with contextlib.suppress(Exception):
+                path.unlink(missing_ok=True)
+        return None
+
+    for path in (tmp_audio, tmp_err):
+        with contextlib.suppress(Exception):
+            path.unlink(missing_ok=True)
+    if ret != 0:
+        log.error("intro video ffmpeg exit=%s", ret)
+        with contextlib.suppress(Exception):
+            tmp_out.unlink(missing_ok=True)
+        return None
+
+    tmp_out.replace(out_path)
+    _intro_video_meta_path().write_text(
+        json.dumps({"signature": intro_video_signature(blocks)}, ensure_ascii=False), encoding="utf-8"
+    )
+    log.info("intro video built: path=%s frames=%d", out_path, len(frames_all))
+    return out_path
+
+
+async def ensure_intro_video(blocks: list[IntroBlock]) -> Path | None:
+    """Return a valid combined intro MP4, building it off-thread if needed."""
+    if intro_video_is_valid(blocks):
+        return intro_video_path()
+    return await asyncio.to_thread(build_intro_video, blocks)
+
+
 async def prebuild_intro_cache() -> None:
     if not INTRO_AUDIO_CACHE_PREBUILD:
         log.info("intro cache prebuild skipped")
@@ -382,6 +552,11 @@ async def prebuild_intro_cache() -> None:
             generated_audio,
             generated_frames,
         )
+        # Build the combined hardware-decodable MP4 once frames+audio are cached.
+        # ensure_intro_video is a no-op when a valid clip already exists.
+        with contextlib.suppress(Exception):
+            video = await ensure_intro_video(blocks)
+            log.info("intro video prebuild: %s", "ready" if video else "skipped")
     except Exception:
         log.exception("intro cache prebuild failed; missing files will be generated on first session")
     finally:

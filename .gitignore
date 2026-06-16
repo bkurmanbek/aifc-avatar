@@ -29,3 +29,6 @@ rec_*.wav
 !logs/.gitkeep
 archive/*
 !archive/.gitkeep
+
+# Local debug screenshots (root)
+/Screenshot*.png
