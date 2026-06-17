@@ -1,0 +1,15 @@
+[Unit]
+Description=ngrok tunnel for AIFC Avatar backend (static domain -> :8080)
+After=network-online.target avatar-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Static reserved domain: the Vercel frontend's VITE_BACKEND_ORIGIN points here, so this
+# domain must not change. ngrok reads the authtoken from ~/.config/ngrok/ngrok.yml.
+ExecStart=/home/admin-aifc/miniforge3/bin/ngrok http --domain=outdoor-yearlong-edythe.ngrok-free.dev 8080 --log=stdout --log-format=logfmt
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

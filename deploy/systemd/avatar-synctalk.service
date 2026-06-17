@@ -1,0 +1,24 @@
+# TEMPLATE — not installed/enabled by default, because SyncTalk is the heavy, persistent
+# GPU service and we avoid disturbing a running instance. Review, then install + enable
+# only when you want SyncTalk to auto-start on boot (see DEPLOY.md). It loads the model +
+# ~5747 avatar frames into VRAM and takes ~60-100s to become ready.
+[Unit]
+Description=SyncTalk 2D inference server (GPU, :8005)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/admin-aifc/avatar-system-2
+Environment=PYTHONUNBUFFERED=1
+Environment=SYNCTALK_AVATAR=aifc-avatar-5-3min_exp_6
+Environment=SYNCTALK_MAX_FRAMES=64
+Environment=SYNCTALK_MAX_WAIT_S=0.015
+ExecStart=/home/admin-aifc/miniforge3/envs/synctalk2d/bin/python /home/admin-aifc/SyncTalk_2D/synctalk_server.py --port 8005
+Restart=always
+RestartSec=5
+# Give the model load room before systemd considers a slow start a failure.
+TimeoutStartSec=180
+
+[Install]
+WantedBy=default.target

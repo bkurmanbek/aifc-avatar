@@ -1,0 +1,19 @@
+[Unit]
+Description=AIFC Avatar backend (FastAPI/uvicorn on :8080)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/admin-aifc/avatar-system-2
+# The base-conda Python needs conda's libstdc++ first; without this, systemd's clean env
+# lets the system libstdc++ load and the import chain fails with CXXABI_1.3.15 not found.
+Environment=LD_LIBRARY_PATH=/home/admin-aifc/miniforge3/lib
+# run_ws_backend.sh sources .env (WS_BACKEND_PYTHON); backend/settings.py loads
+# config.env then .env. It exec's uvicorn, so Type=simple tracks the real process.
+ExecStart=/usr/bin/bash scripts/run_ws_backend.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
