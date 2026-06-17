@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 log = logging.getLogger(__name__)
 
@@ -40,3 +42,15 @@ async def lifespan(_: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.include_router(http_router)
 app.include_router(ws_router)
+
+# Serve the built frontend from the same origin when a production build exists.
+# Mounted LAST so the API and /ws routes above always take precedence; the SPA
+# lives at "/". This lets one process (behind one tunnel) serve UI + API + WS with
+# no CORS, no rewrites, and a same-origin WebSocket. Falls back to API-only if the
+# frontend hasn't been built (frontend/dist absent).
+_FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+if _FRONTEND_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIST), html=True), name="frontend")
+    log.info("Serving frontend from %s", _FRONTEND_DIST)
+else:
+    log.info("Frontend build not found at %s — serving API only", _FRONTEND_DIST)

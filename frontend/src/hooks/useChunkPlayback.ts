@@ -18,7 +18,6 @@ const LIVE_PREBUFFER_S = 2.2
 // How many chunks ahead of the playing one we pre-schedule audio for (gapless seams).
 const AUDIO_SCHEDULE_LOOKAHEAD = 6
 const FRAME_CACHE_INITIAL_LIMIT = 48
-const FRAME_CACHE_NEXT_LIMIT = 24
 const FRAME_CACHE_FETCH_TIMEOUT_MS = 8000
 
 export interface PlaybackCallbacks {
@@ -147,7 +146,7 @@ export function useChunkPlayback(
     isPlayingRef.current = false
     streamActiveRef.current = false
     // Reset perf log on new session so stale data doesn't accumulate
-    ;(window as Record<string, unknown>).__avatarPerf = []
+    ;(window as unknown as Record<string, unknown>).__avatarPerf = []
     if (hideSpeakTimerRef.current) window.clearTimeout(hideSpeakTimerRef.current)
     if (chunkGapTimerRef.current) window.clearTimeout(chunkGapTimerRef.current)
     if (currentSrcRef.current) {
@@ -481,8 +480,8 @@ export function useChunkPlayback(
     }
     // Instrumentation — accessible in devtools as window.__avatarPerf
     const perf: { t: number; fi: number; gap?: number; note?: string }[] = []
-    ;(window as Record<string, unknown>).__avatarPerf ??= []
-    ;((window as Record<string, unknown>).__avatarPerf as unknown[]).push({ chunk: idx, events: perf })
+    ;(window as unknown as Record<string, unknown>).__avatarPerf ??= []
+    ;((window as unknown as Record<string, unknown>).__avatarPerf as unknown[]).push({ chunk: idx, events: perf })
     const loop = () => {
       if (playbackSession !== playbackSessionRef.current) return
       if (!renderActiveRef.current || !acRef.current) return
