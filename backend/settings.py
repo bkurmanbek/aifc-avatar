@@ -49,7 +49,7 @@ APP_PORT = env_int("WS_BACKEND_PORT", 8080)
 
 SONIOX_API_KEY = os.getenv("SONIOX_API_KEY", os.getenv("SONIOX_KEY", ""))
 SONIOX_STT_WS_URL = os.getenv("SONIOX_STT_WS_URL", "wss://stt-rt.soniox.com/transcribe-websocket")
-SONIOX_STT_MODEL = os.getenv("SONIOX_STT_MODEL", "stt-rt-v4")
+SONIOX_STT_MODEL = os.getenv("SONIOX_STT_MODEL", "stt-rt-v5")
 SONIOX_STT_AUDIO_FORMAT = os.getenv("SONIOX_STT_AUDIO_FORMAT", "pcm_s16le")
 SONIOX_STT_SAMPLE_RATE = env_int("SONIOX_STT_SAMPLE_RATE", 16000)
 SONIOX_STT_LANGUAGE_HINTS = [
@@ -60,6 +60,9 @@ SONIOX_STT_LANGUAGE_HINTS = [
 SONIOX_STT_LANGUAGE_HINTS_STRICT = env_bool("SONIOX_STT_LANGUAGE_HINTS_STRICT", True)
 SONIOX_STT_ENABLE_ENDPOINT_DETECTION = env_bool("SONIOX_STT_ENABLE_ENDPOINT_DETECTION", True)
 SONIOX_STT_MAX_ENDPOINT_DELAY_MS = env_int("SONIOX_STT_MAX_ENDPOINT_DELAY_MS", 800)
+# v5 endpointing knob: higher = finalize sooner (snappier), lower = wait longer (fewer
+# mid-sentence cutoffs). Unset → use the model default (keeps v5 backward compatible).
+SONIOX_STT_ENDPOINT_SENSITIVITY = os.getenv("SONIOX_STT_ENDPOINT_SENSITIVITY") or None
 SONIOX_STT_ENDPOINT_WAIT_S = env_float("SONIOX_STT_ENDPOINT_WAIT_S", 0.4)
 SONIOX_STT_FINALIZE_TIMEOUT_S = env_float("SONIOX_STT_FINALIZE_TIMEOUT_S", 1.0)
 SONIOX_STT_REALTIME_FINALIZE_TIMEOUT_S = env_float(

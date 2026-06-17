@@ -22,6 +22,7 @@ from ..settings import (
     SONIOX_STT_AUDIO_FORMAT,
     SONIOX_STT_CONTEXT_MAX_CHARS,
     SONIOX_STT_ENABLE_ENDPOINT_DETECTION,
+    SONIOX_STT_ENDPOINT_SENSITIVITY,
     SONIOX_STT_LANGUAGE_HINTS,
     SONIOX_STT_LANGUAGE_HINTS_STRICT,
     SONIOX_STT_MAX_ENDPOINT_DELAY_MS,
@@ -421,6 +422,13 @@ def _soniox_config(
     if audio_format in {"s16le", "pcm_s16le"}:
         config["sample_rate"] = sample_rate or SONIOX_STT_SAMPLE_RATE
         config["num_channels"] = 1
+    # v5 endpointing sensitivity (optional): only sent when explicitly configured, so
+    # the default behaviour (and v4) is unchanged.
+    if SONIOX_STT_ENDPOINT_SENSITIVITY is not None:
+        try:
+            config["endpoint_sensitivity"] = float(SONIOX_STT_ENDPOINT_SENSITIVITY)
+        except (TypeError, ValueError):
+            log.warning("Ignoring non-numeric SONIOX_STT_ENDPOINT_SENSITIVITY=%r", SONIOX_STT_ENDPOINT_SENSITIVITY)
     config["context"] = _fit_context_to_limit(config["context"])
     return config
 
