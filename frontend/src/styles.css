@@ -614,6 +614,8 @@ body::after {
   font-weight: 800;
   white-space: nowrap;
 }
+.health-tile.ok strong { color: #34d399; }
+.health-tile.warn strong { color: #fbbf24; }
 
 .panel-meter-row {
   display: grid;
@@ -1418,6 +1420,49 @@ body::after {
   background: rgba(18,24,40,0.62);
   box-shadow: 0 16px 34px rgba(0,0,0,0.28);
 }
+
+/* ── Preparing-answer indicator ──────────────────────────── */
+.stage-preparing {
+  position: absolute;
+  left: 50%;
+  top: 18px;
+  transform: translateX(-50%);
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px 8px 12px;
+  border-radius: 999px;
+  background: rgba(12,16,28,0.66);
+  border: 1px solid rgba(91,144,252,0.28);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 12px 30px rgba(0,0,0,0.30);
+  color: #dce8ff;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  animation: msgSlide 220ms ease both;
+}
+.prep-spinner {
+  width: 15px;
+  height: 15px;
+  border-radius: 999px;
+  border: 2px solid rgba(130,173,255,0.25);
+  border-top-color: var(--blue);
+  animation: spin 720ms linear infinite;
+}
+.prep-label { display: inline-flex; align-items: baseline; }
+.prep-dots { display: inline-flex; gap: 3px; margin-left: 2px; }
+.prep-dots i {
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: currentColor;
+  animation: td 1.2s ease-in-out infinite;
+}
+.prep-dots i:nth-child(2) { animation-delay: 0.18s; }
+.prep-dots i:nth-child(3) { animation-delay: 0.36s; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 .video-control-dock {
   position: absolute;

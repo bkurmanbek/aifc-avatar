@@ -45,6 +45,8 @@ export default function App() {
   const [connectedAt, setConnectedAt] = useState<number | null>(null)
   const [connectedSeconds, setConnectedSeconds] = useState(0)
   const [sttReady, setSttReady] = useState(false)
+  const [introAvailable, setIntroAvailable] = useState(false)
+  const [lastLatencyMs, setLastLatencyMs] = useState<number | null>(null)
 
   // ── Refs ──────────────────────────────────────────────────────
   const idleVidRef = useRef<HTMLVideoElement | null>(null)
@@ -66,6 +68,7 @@ export default function App() {
   const currentSessionIdRef = useRef<string | null>(null)
   const activeTurnIdRef = useRef<string | null>(null)
   const showChatRef = useRef(false)
+  const lastIntroUrlRef = useRef<string | null>(null)
   const idleTimerRef = useRef<{ reset: () => void; clear: () => void }>({ reset: () => {}, clear: () => {} })
 
   useEffect(() => {
@@ -130,6 +133,55 @@ export default function App() {
     }
     setIntroActive(false)
   }, [])
+
+  // Play (or replay) the prebuilt intro MP4. Used both by the backend `intro_video`
+  // message and by the manual intro button in the control dock.
+  const playIntroVideo = useCallback((url: string) => {
+    const v = introVidRef.current
+    if (!v) return
+    setIsBusy(true)
+    isBusyRef.current = true
+    setMode('speaking')
+    setIntroActive(true)
+    const finish = () => {
+      v.onended = null
+      v.onerror = null
+      setIntroActive(false)
+      setMode('idle')
+      setIsBusy(false)
+      isBusyRef.current = false
+      log('intro done', 'ok')
+    }
+    v.onended = finish
+    v.onerror = finish
+    v.src = url
+    v.currentTime = 0
+    v.muted = false
+    v.play().catch(() => {
+      // Autoplay-with-sound blocked — show the clip muted rather than nothing.
+      v.muted = true
+      v.play().catch(finish)
+    })
+  }, [log])
+
+  // Dock button: stop the intro if it's playing, otherwise replay the last one.
+  const toggleIntro = useCallback(() => {
+    idleTimerRef.current.reset()
+    if (introActive) {
+      stopIntroVideo()
+      setMode('idle')
+      setIsBusy(false)
+      isBusyRef.current = false
+      return
+    }
+    if (isBusyRef.current) {
+      log('wait for the current response to finish', 'err')
+      return
+    }
+    const url = lastIntroUrlRef.current
+    if (!url) return
+    playIntroVideo(url)
+  }, [introActive, log, playIntroVideo, stopIntroVideo])
 
   const sendTextPrompt = useCallback((text: string) => {
     setInputText('')
@@ -262,32 +314,11 @@ export default function App() {
         }
         case 'intro_video': {
           if (isStaleTurn(msg.turn_id)) return
-          const v = introVidRef.current
-          if (!v) break
           // Hardware-decoded intro clip — bypasses the canvas frame pipeline entirely.
-          setIsBusy(true)
-          isBusyRef.current = true
-          setMode('speaking')
-          setIntroActive(true)
-          const finish = () => {
-            v.onended = null
-            v.onerror = null
-            setIntroActive(false)
-            setMode('idle')
-            setIsBusy(false)
-            isBusyRef.current = false
-            log('intro done', 'ok')
-          }
-          v.onended = finish
-          v.onerror = finish
-          v.src = msg.url
-          v.currentTime = 0
-          v.muted = false
-          v.play().catch(() => {
-            // Autoplay-with-sound blocked — show the clip muted rather than nothing.
-            v.muted = true
-            v.play().catch(finish)
-          })
+          // Remember the URL so the dock's intro button can replay it on demand.
+          lastIntroUrlRef.current = msg.url
+          setIntroAvailable(true)
+          playIntroVideo(msg.url)
           break
         }
         case 'chunk_done': {
@@ -306,6 +337,11 @@ export default function App() {
         case 'done':
           if (isStaleTurn(msg.turn_id)) return
           dispatchConversation({ type: 'done' })
+          {
+            const total = msg.latency_ms?.total
+            const totalMs = typeof total === 'number' ? total : typeof total === 'string' ? Number(total) : NaN
+            if (Number.isFinite(totalMs)) setLastLatencyMs(totalMs)
+          }
           log(`${msg.chunks ?? 1} chunk(s)`, 'ok')
           emitClientLog('info', 'pipeline.done', 'turn completed', { turnId: msg.turn_id, latencyMs: msg.latency_ms })
           playbackRef.current.onAllDone(msg.chunks ?? 1)
@@ -1010,13 +1046,13 @@ export default function App() {
                 <em>{connectedAt ? connectionTime : '00:00'}</em>
               </div>
               <div className="stream-health-grid" aria-label="Stream health">
-                <div className="health-tile">
-                  <span>Health</span>
-                  <strong>Excellent</strong>
+                <div className={`health-tile ${connectedAt ? 'ok' : 'warn'}`}>
+                  <span>Connection</span>
+                  <strong>{connectedAt ? 'Connected' : 'Reconnecting'}</strong>
                 </div>
                 <div className="health-tile">
-                  <span>Latency</span>
-                  <strong>Low</strong>
+                  <span>Last answer</span>
+                  <strong>{lastLatencyMs != null ? `${(lastLatencyMs / 1000).toFixed(1)}s` : '—'}</strong>
                 </div>
               </div>
             </div>
@@ -1073,6 +1109,8 @@ export default function App() {
                 idleVideoRef={idleVidRef}
                 introVideoRef={introVidRef}
                 introActive={introActive}
+                introAvailable={introAvailable}
+                onToggleIntro={toggleIntro}
                 speakCanvasRef={speakCvsRef}
                 mode={mode}
                 micEnabled={micEnabled}
