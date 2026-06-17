@@ -1421,6 +1421,50 @@ body::after {
   box-shadow: 0 16px 34px rgba(0,0,0,0.28);
 }
 
+/* ── Tap-to-start (intro autoplay gate) ──────────────────── */
+.stage-tap-start {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  /* Visual hint only — taps fall through to the window gesture handler that plays the intro. */
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, rgba(6,10,18,0.32), rgba(6,10,18,0.52));
+  backdrop-filter: blur(2px);
+  animation: msgSlide 240ms ease both;
+}
+.tap-start-ring {
+  width: 74px;
+  height: 74px;
+  border-radius: 999px;
+  border: 2px solid rgba(130,173,255,0.55);
+  background: rgba(91,144,252,0.16);
+  box-shadow: 0 0 0 0 rgba(91,144,252,0.45);
+  animation: pulse-ring 1.6s ease-out infinite;
+  position: relative;
+}
+.tap-start-ring::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: #dce8ff;
+}
+.tap-start-label {
+  color: #fff;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-shadow: 0 2px 14px rgba(0,0,0,0.6);
+}
+
 /* ── Preparing-answer indicator ──────────────────────────── */
 .stage-preparing {
   position: absolute;

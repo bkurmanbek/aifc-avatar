@@ -46,6 +46,7 @@ export default function App() {
   const [connectedSeconds, setConnectedSeconds] = useState(0)
   const [sttReady, setSttReady] = useState(false)
   const [introAvailable, setIntroAvailable] = useState(false)
+  const [awaitingIntroTap, setAwaitingIntroTap] = useState(false)
   const [lastLatencyMs, setLastLatencyMs] = useState<number | null>(null)
 
   // ── Refs ──────────────────────────────────────────────────────
@@ -69,6 +70,10 @@ export default function App() {
   const activeTurnIdRef = useRef<string | null>(null)
   const showChatRef = useRef(false)
   const lastIntroUrlRef = useRef<string | null>(null)
+  // Browsers block autoplay-with-sound until a user gesture. We hold the intro until the
+  // first tap/click, then play it with audio (see the gesture effect below).
+  const userInteractedRef = useRef(false)
+  const pendingIntroUrlRef = useRef<string | null>(null)
   const idleTimerRef = useRef<{ reset: () => void; clear: () => void }>({ reset: () => {}, clear: () => {} })
 
   useEffect(() => {
@@ -248,6 +253,8 @@ export default function App() {
           break
         case 'response_start':
           activeTurnIdRef.current = msg.turn_id ?? null
+          setAwaitingIntroTap(false)
+          pendingIntroUrlRef.current = null
           stopIntroVideo()
           playbackRef.current.startStream(msg.turn_id)
           beginAssistantMsg()
@@ -318,7 +325,15 @@ export default function App() {
           // Remember the URL so the dock's intro button can replay it on demand.
           lastIntroUrlRef.current = msg.url
           setIntroAvailable(true)
-          playIntroVideo(msg.url)
+          // Autoplay-with-sound is blocked before a user gesture. If the user hasn't
+          // interacted yet, hold the intro and show "Tap to start"; the gesture handler
+          // will play it with audio. Otherwise play immediately.
+          if (userInteractedRef.current) {
+            playIntroVideo(msg.url)
+          } else {
+            pendingIntroUrlRef.current = msg.url
+            setAwaitingIntroTap(true)
+          }
           break
         }
         case 'chunk_done': {
@@ -844,19 +859,32 @@ export default function App() {
     idleTimerRef.current = idleTimer
   }, [idleTimer])
 
+  // First user gesture unlocks audio. It plays a deferred intro WITH SOUND (autoplay-with-
+  // sound is blocked until a gesture), otherwise it starts active listening. Re-arms after
+  // the intro finishes (isBusy → false) so the next tap starts listening.
   useEffect(() => {
-    if (!micEnabled || activeListening || isListening || isBusy) return
-    const start = () => {
-      if (!micEnabledRef.current || activeListeningRef.current || isListeningRef.current) return
-      void micRef.current.ensureActiveListening()
+    if (isBusy) return
+    const onGesture = () => {
+      userInteractedRef.current = true
+      playback.ensureAudioContext()
+      const pending = pendingIntroUrlRef.current
+      if (pending) {
+        pendingIntroUrlRef.current = null
+        setAwaitingIntroTap(false)
+        playIntroVideo(pending)  // within the gesture's call stack → audio allowed
+        return
+      }
+      if (micEnabledRef.current && !activeListeningRef.current && !isListeningRef.current) {
+        void micRef.current.ensureActiveListening()
+      }
     }
-    window.addEventListener('pointerdown', start, { once: true })
-    window.addEventListener('keydown', start, { once: true })
+    window.addEventListener('pointerdown', onGesture, { once: true })
+    window.addEventListener('keydown', onGesture, { once: true })
     return () => {
-      window.removeEventListener('pointerdown', start)
-      window.removeEventListener('keydown', start)
+      window.removeEventListener('pointerdown', onGesture)
+      window.removeEventListener('keydown', onGesture)
     }
-  }, [micEnabled, activeListening, isListening, isBusy])
+  }, [isBusy, playback, playIntroVideo])
 
   // ── Keyboard shortcuts ───────────────────────────────────────
   useEffect(() => {
@@ -909,6 +937,10 @@ export default function App() {
   const submitPrompt = useCallback((text: string) => {
     idleTimerRef.current.reset()
     playback.ensureAudioContext()
+    // Typing a question counts as the first interaction — drop any pending intro gate.
+    userInteractedRef.current = true
+    pendingIntroUrlRef.current = null
+    setAwaitingIntroTap(false)
     if (!text) return
     if (isBusyRef.current) {
       log('wait for the current response to finish', 'err')
@@ -1110,6 +1142,7 @@ export default function App() {
                 introVideoRef={introVidRef}
                 introActive={introActive}
                 introAvailable={introAvailable}
+                awaitingIntroTap={awaitingIntroTap}
                 onToggleIntro={toggleIntro}
                 speakCanvasRef={speakCvsRef}
                 mode={mode}

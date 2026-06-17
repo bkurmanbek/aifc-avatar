@@ -18,6 +18,7 @@ interface AvatarStageProps {
   introVideoRef: RefObject<HTMLVideoElement | null>
   introActive: boolean
   introAvailable: boolean
+  awaitingIntroTap: boolean
   speakCanvasRef: RefObject<HTMLCanvasElement | null>
   onToggleMic: () => void
   onToggleMute: () => void
@@ -37,6 +38,7 @@ export function AvatarStage({
   introVideoRef,
   introActive,
   introAvailable,
+  awaitingIntroTap,
   speakCanvasRef,
   onToggleMic,
   onToggleMute,
@@ -66,6 +68,12 @@ export function AvatarStage({
         <video ref={idleVideoRef} id="idleVid" autoPlay loop muted playsInline src={IDLE_VIDEO_SRC} />
         <video ref={introVideoRef} id="introVid" className={introActive ? 'show' : ''} playsInline />
         <canvas ref={speakCanvasRef} id="speakCvs" width={CANVAS_W} height={CANVAS_H} />
+        {awaitingIntroTap && (
+          <div className="stage-tap-start" role="status" aria-live="polite">
+            <span className="tap-start-ring" aria-hidden="true" />
+            <span className="tap-start-label">Tap to start</span>
+          </div>
+        )}
         {AVATAR_LABEL && (
           <div className="stage-overlay">
             <span className="stage-avatar-label">{AVATAR_LABEL}</span>
