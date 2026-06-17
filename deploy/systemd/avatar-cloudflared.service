@@ -1,0 +1,16 @@
+[Unit]
+Description=AIFC Avatar Cloudflare Tunnel (avatar.bk-project.org -> localhost:8080)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Named tunnel "avatar" (id 45795a00-...). Config + credentials live in ~/.cloudflared/.
+# Cloudflare Tunnel replaces ngrok for the heavy binary frame stream: no bandwidth
+# throttle (box uplink ~88 Mbps is the ceiling) and a PoP in Almaty (ala02) for low RTT.
+ExecStart=/home/admin-aifc/miniforge3/bin/cloudflared tunnel --config /home/admin-aifc/.cloudflared/config.yml run avatar
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
