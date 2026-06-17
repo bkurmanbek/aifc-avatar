@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
 import type { WsInbound } from '../types'
-import { RECONNECT_BASE_MS, RECONNECT_MAX_MS } from '../constants'
+import { RECONNECT_BASE_MS, RECONNECT_MAX_MS, WS_HEARTBEAT_MS, WS_HEARTBEAT_TIMEOUT_MS } from '../constants'
 
 let pageIntroToken: string | null = null
 
@@ -31,6 +31,9 @@ export function useWebSocket(handlers: WsHandlers) {
   const reconnectTimerRef = useRef<number | null>(null)
   const handlersRef = useRef(handlers)
   const fallbackAttemptedRef = useRef(false)
+  const heartbeatTimerRef = useRef<number | null>(null)
+  const watchdogTimerRef = useRef<number | null>(null)
+  const armWatchdogRef = useRef<() => void>(() => {})
   const connectRef = useRef<(targetUrl?: string) => void>(() => {})
   const configuredWsUrl = (import.meta.env.VITE_WS_URL as string | undefined)?.trim()
   const introTokenNamespace = [
@@ -56,6 +59,44 @@ export function useWebSocket(handlers: WsHandlers) {
       reconnectTimerRef.current = null
     }
   }, [])
+
+  const stopHeartbeat = useCallback(() => {
+    if (heartbeatTimerRef.current != null) {
+      window.clearInterval(heartbeatTimerRef.current)
+      heartbeatTimerRef.current = null
+    }
+    if (watchdogTimerRef.current != null) {
+      window.clearTimeout(watchdogTimerRef.current)
+      watchdogTimerRef.current = null
+    }
+    armWatchdogRef.current = () => {}
+  }, [])
+
+  // Start pinging on an open socket and arm a watchdog that force-closes the socket
+  // (triggering the normal reconnect path) if no traffic arrives in time. Any inbound
+  // message re-arms the watchdog, so an active stream keeps the connection alive without
+  // relying on pong specifically.
+  const startHeartbeat = useCallback((socket: WebSocket) => {
+    stopHeartbeat()
+    const armWatchdog = () => {
+      if (watchdogTimerRef.current != null) window.clearTimeout(watchdogTimerRef.current)
+      watchdogTimerRef.current = window.setTimeout(() => {
+        handlersRef.current.onError?.({
+          source: 'websocket.watchdog',
+          message: `no traffic for ${WS_HEARTBEAT_TIMEOUT_MS}ms - forcing reconnect`,
+          detail: { readyState: socket.readyState },
+        })
+        try { socket.close() } catch { /* ignore */ }
+      }, WS_HEARTBEAT_TIMEOUT_MS)
+    }
+    armWatchdogRef.current = armWatchdog
+    armWatchdog()
+    heartbeatTimerRef.current = window.setInterval(() => {
+      if (socket.readyState === WebSocket.OPEN) {
+        try { socket.send(JSON.stringify({ type: 'ping', t: Date.now() })) } catch { /* ignore */ }
+      }
+    }, WS_HEARTBEAT_MS)
+  }, [stopHeartbeat])
 
   const sendWs = useCallback((payload: unknown) => {
     const ws = wsRef.current
@@ -156,9 +197,11 @@ export function useWebSocket(handlers: WsHandlers) {
       handlersRef.current.onConnected()
       reconnectDelayRef.current = RECONNECT_BASE_MS
       fallbackAttemptedRef.current = false
+      startHeartbeat(ws)
     }
 
     ws.onclose = (event) => {
+      stopHeartbeat()
       scheduleReconnect(
         {
           code: event.code,
@@ -187,6 +230,8 @@ export function useWebSocket(handlers: WsHandlers) {
         console.debug('[websocket] ignoring message from stale socket', { wsUrl })
         return
       }
+      // Any inbound traffic proves the socket is alive — re-arm the liveness watchdog.
+      armWatchdogRef.current()
       // Binary messages are avatar frames (magic 0xF1). Parse the small header and
       // hand the raw JPEG bytes straight to playback — no JSON, no base64.
       if (event.data instanceof ArrayBuffer) {
@@ -213,6 +258,8 @@ export function useWebSocket(handlers: WsHandlers) {
       }
       try {
         const d = JSON.parse(event.data) as WsInbound
+        // Heartbeat reply — already re-armed the watchdog above; don't forward it.
+        if ((d as { type?: string }).type === 'pong') return
         handlersRef.current.onMessage(d)
       } catch (error) {
         handlersRef.current.onError?.({
@@ -225,7 +272,7 @@ export function useWebSocket(handlers: WsHandlers) {
         })
       }
     }
-  }, [clearReconnectTimer, fallbackWsUrlWithToken, scheduleReconnect, shouldTryFallback])
+  }, [clearReconnectTimer, fallbackWsUrlWithToken, scheduleReconnect, shouldTryFallback, startHeartbeat, stopHeartbeat])
 
   useEffect(() => {
     connectRef.current = connect
@@ -242,13 +289,14 @@ export function useWebSocket(handlers: WsHandlers) {
     return () => {
       window.clearTimeout(connectTimer)
       clearReconnectTimer()
+      stopHeartbeat()
       const ws = wsRef.current
       wsRef.current = null
       ws?.close()
       fallbackAttemptedRef.current = false
       activeTargetRef.current = primaryWsUrl
     }
-  }, [connect, clearReconnectTimer, primaryWsUrl])
+  }, [connect, clearReconnectTimer, stopHeartbeat, primaryWsUrl])
 
   return { sendWs, wsRef }
 }

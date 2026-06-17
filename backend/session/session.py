@@ -510,6 +510,12 @@ class ClientSession:
             await self.writer.send({"type": "error", "text": "Invalid message payload"})
             return
         msg_type = payload.get("type")
+        # Liveness ping from the client heartbeat — reply immediately and skip the
+        # receive log so the ~5s cadence doesn't spam the event stream.
+        if msg_type == "ping":
+            with contextlib.suppress(ClientClosedError):
+                await self.writer.send({"type": "pong", "t": payload.get("t")})
+            return
         log_event(ws_log, "ws_receive", session_id=self.session_id, request_id=self.active_turn_id, **_summarize_client_payload(payload))
         if msg_type == "audio_chunk":
             chunk = await self._decode_audio_payload(payload)

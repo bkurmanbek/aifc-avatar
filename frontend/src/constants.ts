@@ -19,3 +19,8 @@ export const CANVAS_W = readNumber('VITE_CANVAS_W', 540, 160, 2160)
 export const CANVAS_H = readNumber('VITE_CANVAS_H', 960, 160, 3840)
 export const RECONNECT_BASE_MS = readNumber('VITE_RECONNECT_BASE_MS', 1500, 250, 30000)
 export const RECONNECT_MAX_MS = readNumber('VITE_RECONNECT_MAX_MS', 30000, 1000, 120000)
+// Application-level heartbeat: send a ping every WS_HEARTBEAT_MS and force a reconnect
+// if no traffic (pong or any message) arrives within WS_HEARTBEAT_TIMEOUT_MS. Catches
+// half-open sockets far faster than the TCP timeout.
+export const WS_HEARTBEAT_MS = readNumber('VITE_WS_HEARTBEAT_MS', 5000, 1000, 60000)
+export const WS_HEARTBEAT_TIMEOUT_MS = readNumber('VITE_WS_HEARTBEAT_TIMEOUT_MS', 12000, 3000, 120000)
