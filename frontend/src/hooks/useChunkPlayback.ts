@@ -608,7 +608,7 @@ export function useChunkPlayback(
     if (turnId) ch.turnId = turnId
     if (expectedFrames != null) ch.expectedFrames = expectedFrames
     const playbackSession = playbackSessionRef.current
-    fetch(backendHttpUrl(url))
+    fetch(backendHttpUrl(url), { headers: { 'ngrok-skip-browser-warning': 'true' } })
       .then((r) => r.arrayBuffer())
       .then((buf) => {
         if (playbackSession !== playbackSessionRef.current || isStaleTurn(turnId)) return
@@ -678,6 +678,7 @@ export function useChunkPlayback(
         const response = await fetch(`${backendHttpUrl(url)}${joiner}start=${start}&limit=${limit}`, {
           cache: 'force-cache',
           signal: controller.signal,
+          headers: { 'ngrok-skip-browser-warning': 'true' },
         })
         if (!response.ok) throw new Error(`frame cache fetch failed: ${response.status}`)
         return response.json() as Promise<{ frames?: unknown[]; end?: number; total?: number; has_more?: boolean }>
