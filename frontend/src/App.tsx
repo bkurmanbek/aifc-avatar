@@ -859,11 +859,12 @@ export default function App() {
     idleTimerRef.current = idleTimer
   }, [idleTimer])
 
-  // First user gesture unlocks audio. It plays a deferred intro WITH SOUND (autoplay-with-
-  // sound is blocked until a gesture), otherwise it starts active listening. Re-arms after
-  // the intro finishes (isBusy → false) so the next tap starts listening.
+  // Persistent gesture listener that unlocks audio on any tap/key. A deferred intro plays
+  // WITH SOUND from inside the gesture (autoplay-with-sound is blocked otherwise) — this
+  // branch must run even while isBusy is true, because the intro turn sets isBusy via
+  // response_start. Otherwise (idle), the gesture starts active listening. The listener is
+  // NOT gated on isBusy at registration; the listening branch is guarded by isBusyRef.
   useEffect(() => {
-    if (isBusy) return
     const onGesture = () => {
       userInteractedRef.current = true
       playback.ensureAudioContext()
@@ -874,17 +875,17 @@ export default function App() {
         playIntroVideo(pending)  // within the gesture's call stack → audio allowed
         return
       }
-      if (micEnabledRef.current && !activeListeningRef.current && !isListeningRef.current) {
+      if (!isBusyRef.current && micEnabledRef.current && !activeListeningRef.current && !isListeningRef.current) {
         void micRef.current.ensureActiveListening()
       }
     }
-    window.addEventListener('pointerdown', onGesture, { once: true })
-    window.addEventListener('keydown', onGesture, { once: true })
+    window.addEventListener('pointerdown', onGesture)
+    window.addEventListener('keydown', onGesture)
     return () => {
       window.removeEventListener('pointerdown', onGesture)
       window.removeEventListener('keydown', onGesture)
     }
-  }, [isBusy, playback, playIntroVideo])
+  }, [playback, playIntroVideo])
 
   // ── Keyboard shortcuts ───────────────────────────────────────
   useEffect(() => {
