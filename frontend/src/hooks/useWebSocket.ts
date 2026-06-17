@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react'
 import type { WsInbound } from '../types'
 import { RECONNECT_BASE_MS, RECONNECT_MAX_MS, WS_HEARTBEAT_MS, WS_HEARTBEAT_TIMEOUT_MS } from '../constants'
+import { BACKEND_ORIGIN, backendWsUrl } from '../utils'
 
 let pageIntroToken: string | null = null
 
@@ -35,7 +36,10 @@ export function useWebSocket(handlers: WsHandlers) {
   const watchdogTimerRef = useRef<number | null>(null)
   const armWatchdogRef = useRef<() => void>(() => {})
   const connectRef = useRef<(targetUrl?: string) => void>(() => {})
+  // Explicit VITE_WS_URL wins; otherwise derive from VITE_BACKEND_ORIGIN (split deploy);
+  // otherwise fall back to the page origin's /ws (single-origin / local).
   const configuredWsUrl = (import.meta.env.VITE_WS_URL as string | undefined)?.trim()
+    || (BACKEND_ORIGIN ? backendWsUrl('/ws') : '')
   const introTokenNamespace = [
     window.location.origin,
     configuredWsUrl || '',

@@ -1,7 +1,7 @@
 
 import { useState, useEffect, useRef, useCallback, useReducer } from 'react'
 import type { WsInbound, UiMode } from './types'
-import { detectUiLanguage, encodeBase64 } from './utils'
+import { detectUiLanguage, encodeBase64, backendHttpUrl } from './utils'
 import { MicVAD } from '@ricky0123/vad-web'
 import type { RealTimeVADOptions } from '@ricky0123/vad-web'
 import { IDLE_TIMEOUT_MS, VAD_SILENCE_LEVEL, AUTO_ENDPOINT_MS, MIN_RECORD_MS, VAD_INTERVAL_MS } from './constants'
@@ -154,7 +154,7 @@ export default function App() {
     }
     v.onended = finish
     v.onerror = finish
-    v.src = url
+    v.src = backendHttpUrl(url)
     v.currentTime = 0
     v.muted = false
     v.play().catch(() => {

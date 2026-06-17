@@ -1,6 +1,7 @@
 import { useRef, useCallback, useEffect } from 'react'
 import type { ChunkState } from '../types'
 import { FPS, CANVAS_W, CANVAS_H } from '../constants'
+import { backendHttpUrl } from '../utils'
 
 const LIVE_FRAME_HEADROOM_S = 0.14
 const LIVE_READY_FRAME_HEADROOM = 10
@@ -607,7 +608,7 @@ export function useChunkPlayback(
     if (turnId) ch.turnId = turnId
     if (expectedFrames != null) ch.expectedFrames = expectedFrames
     const playbackSession = playbackSessionRef.current
-    fetch(url)
+    fetch(backendHttpUrl(url))
       .then((r) => r.arrayBuffer())
       .then((buf) => {
         if (playbackSession !== playbackSessionRef.current || isStaleTurn(turnId)) return
@@ -674,7 +675,7 @@ export function useChunkPlayback(
       frameCacheControllersRef.current.add(controller)
       const timer = window.setTimeout(() => controller.abort(), FRAME_CACHE_FETCH_TIMEOUT_MS)
       try {
-        const response = await fetch(`${url}${joiner}start=${start}&limit=${limit}`, {
+        const response = await fetch(`${backendHttpUrl(url)}${joiner}start=${start}&limit=${limit}`, {
           cache: 'force-cache',
           signal: controller.signal,
         })

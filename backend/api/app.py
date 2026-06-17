@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 log = logging.getLogger(__name__)
@@ -40,6 +42,21 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# CORS for split deployments (e.g. frontend on Vercel calling this backend's HTTP asset
+# routes — /intro-audio, /intro-cache — cross-origin). Comma-separated allowlist via
+# CORS_ALLOW_ORIGINS; defaults to "*" since these routes serve only public, uncredentialed
+# media. WebSocket and cross-origin <video>/<audio> playback are not subject to CORS.
+_cors_origins = [o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if o.strip()] or ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
+)
+
 app.include_router(http_router)
 app.include_router(ws_router)
 
