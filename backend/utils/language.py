@@ -397,12 +397,23 @@ def dedupe_repeated_transcript(text: str) -> str:
     return stripped
 
 
+# Words unambiguous enough to mean "stop" even mid-sentence (rarely part of a genuine
+# question). Ambiguous ones (cancel/pause/enough/хватит/достаточно/болды…) are matched
+# only as a whole-utterance via STOP_KEYWORDS, so they don't false-trigger inside a real
+# question like "how do I cancel my card?".
+_STANDALONE_STOP_WORDS = {
+    "стоп", "stop", "тоқта", "тоқтаңыз", "тоқтатыңыз",
+    "остановись", "остановитесь", "прекрати", "прекратите",
+    "停", "停止",
+}
+
+
 def is_stop_command(text: str) -> bool:
     normalized = " ".join(text.lower().strip().split())
     if normalized in STOP_KEYWORDS:
         return True
     words = set(_WORD_RE.findall(normalized))
-    return bool(words & {"стоп", "stop", "тоқта"})
+    return bool(words & _STANDALONE_STOP_WORDS)
 
 
 def is_noise_utterance(text: str) -> bool:

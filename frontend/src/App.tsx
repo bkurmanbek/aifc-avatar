@@ -610,6 +610,14 @@ export default function App() {
     let manualAudioStarted = false
     let activeMode = false
     let activeVadState: ActiveVadState = 'inactive'
+    // Pre-roll ring buffer: the VAD only fires onSpeechStart AFTER it has confirmed
+    // speech, so the audio that *triggered* detection (the first syllable) is never
+    // streamed and the transcript loses the word onset. We continuously buffer the
+    // most recent ~preRollMs of frames while idle and flush them to STT the instant
+    // speech starts, so Soniox sees the full utterance from the first sound.
+    const PREROLL_MAX_SAMPLES = Math.ceil((activeListeningConfig.preRollMs / 1000) * 16000)
+    let preRollBuf: Float32Array[] = []
+    let preRollSamples = 0
 
     const setActiveVadState = (state: ActiveVadState) => {
       if (activeVadState === state) return
@@ -834,6 +842,14 @@ export default function App() {
             setIsListening(true)
             setActiveVadState('recording')
             setMode('listening')
+            // Flush the buffered onset so the transcript isn't missing the first word.
+            if (preRollBuf.length > 0) {
+              for (const f of preRollBuf) {
+                sendWsRef.current({ type: 'audio_chunk', data: encodeBase64(encodePCM16(f)) })
+              }
+              preRollBuf = []
+              preRollSamples = 0
+            }
           },
           onSpeechRealStart: () => {},
           onVADMisfire: () => {
@@ -850,8 +866,16 @@ export default function App() {
               // incrementally. Any delay here adds directly to time-to-first-partial.
               const pcm16 = encodePCM16(frame)
               sendWsRef.current({ type: 'audio_chunk', data: encodeBase64(pcm16) })
+            } else {
+              // Idle: keep the last ~preRollMs of audio so onSpeechStart can flush the
+              // onset. Copy the frame — the VAD reuses its buffer between callbacks.
+              preRollBuf.push(frame.slice())
+              preRollSamples += frame.length
+              while (preRollSamples > PREROLL_MAX_SAMPLES && preRollBuf.length > 1) {
+                preRollSamples -= preRollBuf.shift()!.length
+              }
+              if (activeVadState !== 'monitoring') setActiveVadState('monitoring')
             }
-            if (!isListeningRef.current && activeVadState !== 'monitoring') setActiveVadState('monitoring')
           },
           onSpeechEnd: () => {
             if (!micEnabledRef.current) return
@@ -1227,7 +1251,11 @@ export default function App() {
                 isBusy={isBusy}
                 showComposer={showComposer}
                 showTranscript={Boolean(isListening || partialText)}
-                onToggleMic={() => { void micRef.current.toggleMic() }}
+                onTalk={() => {
+                  // "Tap to talk": ensure the mic is on (unmute if needed) and listening.
+                  if (!micEnabledRef.current) { micEnabledRef.current = true; setMicEnabled(true) }
+                  void micRef.current.ensureActiveListening()
+                }}
                 onToggleMute={() => {
                   const enabled = !micEnabled
                   setMicEnabled(enabled)

@@ -19,7 +19,7 @@ interface AvatarStageProps {
   introActive: boolean
   awaitingIntroTap: boolean
   speakCanvasRef: RefObject<HTMLCanvasElement | null>
-  onToggleMic: () => void
+  onTalk: () => void
   onToggleMute: () => void
   onStartIntro: () => void
   onInterrupt: () => void
@@ -38,14 +38,18 @@ export function AvatarStage({
   introActive,
   awaitingIntroTap,
   speakCanvasRef,
-  onToggleMic,
+  onTalk,
   onToggleMute,
   onStartIntro,
   onInterrupt,
   onToggleComposer,
 }: AvatarStageProps) {
   const stageRef = useRef<HTMLDivElement | null>(null)
-  const primaryAction = isBusy && !isListening ? onInterrupt : onToggleMic
+  // Primary control = "Talk / Stop": while the avatar is speaking it stops it
+  // (interrupt); otherwise it starts/affirms listening (onTalk also unmutes the mic
+  // if it was muted, so the button is never a dead end).
+  const primaryAction = isBusy && !isListening ? onInterrupt : onTalk
+  const primaryLabel = isBusy && !isListening ? 'Stop the avatar' : isListening ? 'Listening — speak now' : 'Tap to talk'
   // "Preparing answer": the query was sent and we're generating, but no avatar
   // frames are rendering yet. Distinct from listening/speaking. Note 'rendering' is a
   // between-chunk state DURING speech, so it must NOT count here or the badge would
@@ -96,8 +100,8 @@ export function AvatarStage({
             className={`video-ctrl video-ctrl-primary ${isListening ? 'listening' : ''} ${isBusy && !isListening ? 'danger' : ''}`}
             type="button"
             onClick={primaryAction}
-            disabled={!micEnabled && !isBusy}
-            aria-label={isListening ? 'Stop recording' : isBusy ? 'Interrupt response' : 'Start speaking'}
+            aria-label={primaryLabel}
+            title={primaryLabel}
           >
             {isBusy && !isListening ? (
               <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
