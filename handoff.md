@@ -3,6 +3,65 @@
 _Session date: 2026-06-16. Read this first, then `CLAUDE.md`. This documents an end-to-end
 effort to kill avatar stuttering and chunk-transition gaps across the intro and answer paths._
 
+> **Update 2026-06-17 — resilience + control panel. See the section directly below.**
+> The stutter work (Phases 1–5) is unchanged and still current.
+
+---
+
+## Session 2026-06-17 — resilience + control panel
+
+Follow-up session. The user wanted to "check and think" about four areas: (1) WS failover/retry,
+(2) TTS/LLM buffering, (3) a better control panel, (4) a frame-streaming robustness re-check.
+After discussion we deliberately implemented a **leaner, high-leverage subset** and staged the
+heavy/architectural pieces. Three commits landed on `main` (not yet pushed at time of writing —
+confirm with the user):
+
+1. **Control panel redesign** (`920e887`) — `frontend/src/{App.tsx, components/AvatarStage.tsx,
+   styles.css}`:
+   - **Intro start/stop button** in the under-avatar `video-control-dock`. Replays the cached intro
+     MP4 — `App.tsx` stashes the URL from the `intro_video` message into `lastIntroUrlRef` and exposes
+     `playIntroVideo()` (extracted from the message handler) + `toggleIntro()`. Disabled until an intro
+     URL has arrived (`introAvailable` state). Shows a stop glyph while playing.
+   - **"Preparing answer" badge** (`.stage-preparing`, spinner + animated dots) shown ONLY when
+     `isBusy && !isListening && !introActive && mode === 'thinking'`. **Must exclude `'rendering'`** —
+     that's a between-chunk state during active speech, so including it flashes the badge mid-answer.
+   - **Real status tiles** — replaced the hardcoded "Excellent / Low" health tiles with Connection
+     (`connectedAt ? Connected : Reconnecting`) and Last-answer latency (`done` payload's
+     `latency_ms.total`, which is a dict not a number — read `.total`). New `.health-tile.ok/.warn`.
+   - Zoom in/out was proposed but **dropped at the user's request** — fullscreen only.
+
+2. **SyncTalk segment retry** (`7c761bc`) — `backend/pipeline/response_stream.py`
+   `_run_streaming_avatar_worker`. A single frame timeout used to raise and drop a whole ~1.5s segment
+   (audible+visible jump → frontend marks `ch.error`, `isChunkReadyToPlay` skips it). Now retries once
+   (`_AVATAR_SEGMENT_MAX_ATTEMPTS=2`, `_AVATAR_SEGMENT_RETRY_DELAY_S=0.1`) **only when zero frames were
+   emitted** on the failed attempt — retrying after partial output would duplicate frames. `start_frame`
+   is identical across attempts so the head-pose walk resumes at the same pose (no drift). Logs
+   `avatar_chunk_retry` and `attempts=` in `avatar_chunk_done`.
+
+3. **WS heartbeat + watchdog** (`3ab10c0`) — `frontend/src/hooks/useWebSocket.ts`,
+   `frontend/src/constants.ts`, `backend/session/session.py`. Client pings every `WS_HEARTBEAT_MS` (5s)
+   and arms a watchdog that force-closes the socket (→ existing reconnect path) if no traffic arrives in
+   `WS_HEARTBEAT_TIMEOUT_MS` (12s). **Any** inbound message re-arms it (`armWatchdogRef`), so an active
+   stream stays alive without relying on pong. Backend replies `pong`, short-circuited **before** the
+   `ws_receive` log so the 5s cadence doesn't spam the event stream; frontend swallows `pong` so it's
+   not forwarded as an unknown type. Catches half-open sockets far faster than the TCP timeout.
+
+**Deliberately staged (NOT done — with rationale), if the user asks to go further:**
+- **Session-resumption-by-token** — would let history survive a reconnect (each reconnect currently
+  spins up a fresh backend `session_id`). Rejected as too invasive for a kiosk; the fast watchdog makes
+  drops brief and the client VAD keeps streaming on the new socket so listening auto-resumes.
+- **TTS mid-stream resynthesis** — on a TTS WS drop, resynthesize the unspoken remainder (we hold the
+  full spoken text). Real but rarer; needs a spoken-cursor. Chat text already shows the full answer.
+- **Generalized durable-message replay** — `pendingPromptRef` already covers the only message that
+  matters (text); interrupt/reset are moot against a fresh session.
+- **STT client pre-roll ring buffer** — lazy-connect under a lock already prevents audio loss at
+  utterance start, so the latency win is marginal.
+
+**Verification status:** frontend `tsc --noEmit` clean; backend modules import clean. **Not yet
+confirmed in-browser** — restart frontend+backend (leave SyncTalk up) and check: intro button
+replays; "Preparing answer" appears after a query and disappears once frames render (no mid-answer
+flash); pull the network briefly and confirm the watchdog reconnects within ~12s.
+
 ---
 
 ## TL;DR — current state
