@@ -3,9 +3,76 @@
 _Session date: 2026-06-16. Read this first, then `CLAUDE.md`. This documents an end-to-end
 effort to kill avatar stuttering and chunk-transition gaps across the intro and answer paths._
 
-> **Update 2026-06-17 (later) — public deploy + intro playback fix. See the FIRST section below.**
-> **Update 2026-06-17 — resilience + control panel. See the second section below.**
+> **Update 2026-06-17 (latest) — interrupt/barge-in robustness + `CODE_REVIEW.md` verdict. See the FIRST section below.**
+> **Update 2026-06-17 (later) — public deploy + intro playback fix.**
+> **Update 2026-06-17 — resilience + control panel.**
 > The stutter work (Phases 1–5) is unchanged and still current.
+
+---
+
+## Session 2026-06-17 (latest) — barge-in/interrupt hardening + code-review triage
+
+This block covers: the single-session gate, the interrupt non-blocking fix, the SyncTalk
+abort-on-disconnect, the barge-in/VAD tuning, and a **triage of `CODE_REVIEW.md`** (a
+whole-codebase external review, 15 findings).
+
+### What shipped (all live; commits local, not yet pushed)
+- **Single-pipeline session gate** (`backend/session/session_gate.py`, `b0785e3`): one live WS
+  session at a time; extras get `{type:'busy'}` + close 1013; idle holders evicted after
+  `SESSION_IDLE_EVICT_S`. Frontend shows a "please wait" overlay and auto-retries.
+- **Non-blocking interrupt** (`session.py interrupt()`, `9a32246`): cancel + bounded
+  `asyncio.wait(1.5s)` + background `_drain_cancelled`; `SYNCTALK_FRAME_TIMEOUT_S` 8s→3s. Fixed
+  the WS-disconnect/mic-hang under heavy interrupts (ping after interrupt → pong in ~3ms).
+- **SyncTalk abort-on-disconnect** (separate repo `SyncTalk_2D/synctalk_server.py`, `00f30dd`):
+  `/infer_stream` polls `request.is_disconnected()` before each GPU batch. **Verified working** —
+  log shows `aborted on disconnect after 1/7 batches`; a full request logs nothing. Needs a
+  SyncTalk restart to take effect (done).
+- **Barge-in/VAD tuning** (`45e5e38`): `positiveSpeechThreshold` 0.40, `minSpeechMs` 500,
+  `_MIN_INTERRUPTING_ALPHA_CHARS` 7, post-stop ignore 1.0s; STT onset preroll-buffer flush; mic
+  button reworked to a clear Talk/Stop control.
+
+### CODE_REVIEW.md triage — verdicts (verified against the code)
+**Confirmed real (fix recommended):**
+- **#1 `pipeline_task` clobber 🔴 — REAL regression from `9a32246`.** `run_query`/`run_intro`
+  `finally` unconditionally do `self.pipeline_task = None` (+ `active_turn_id`). Now that
+  `interrupt()` detaches and background-drains a slow task, the old task's `finally` can run
+  *after* a new turn is assigned and null it out → barge-in/Stop silently stop working for the
+  new turn, and a 2nd concurrent `run_query` can start. **Fix:** guard the `finally` with
+  `if self.pipeline_task is <this task>` (capture `asyncio.current_task()`); same for
+  `active_turn_id`. **This is the top priority.**
+- **#2 double-emit `spoken` 🔴 — REAL (small window).** `winner_already_streamed` keys off
+  `winner.source`; if Gemini streamed via `on_spoken_delta` but FAQ/cache/fallback wins,
+  `emit_spoken_text` re-sends → doubled/garbled audio. Fix: key off `spoken_streaming_active`.
+- **#5 `force_disconnect` under gate lock 🟠 — REAL.** `acquire()` awaits the networked
+  `force_disconnect` while holding `self._lock`; a hung socket serializes all admit/release.
+  Fix: pop under lock, disconnect outside.
+- **#6 `_drain_cancelled` fire-and-forget 🟠 — REAL.** Untracked `create_task` can be GC'd. Hold
+  a strong ref in a `set` + done-callback.
+- **#10 ImageBitmap double-decode leak 🟡 — REAL.** `ensureBitmapReady` never registers in
+  `bitmapPending`, so `preloadBitmap` also decodes and overwrites without `.close()` in some
+  orderings. Fix: register in `bitmapPending` or close-before-overwrite.
+- **#7 surrogate pairs 🟡 (low likelihood — emoji rare in answers), #8 intro-build race 🟡,
+  #12 FAQ EN-only 🟡 (mitigated by `faq_candidate`), #14 object-URL not revoked 🟢,
+  #15 wrong constant in timeout log 🟢 (`answer_race.py:104`)** — all real, low impact.
+
+**Overstated / nuanced:**
+- **#3 reconnect storm 🔴→🟠.** Mechanism real (`onopen` resets backoff → ~1.5s retries, no
+  growth), but bounded (1 cheap connect/1.5s/client, rejected before prewarm). Not critical.
+- **#4 shared TTS socket close 🟠.** The stated cause ("2 parallel TTS streams from 2 avatar
+  workers") is wrong — there's ONE TTS/media worker. But the shared-socket-close-kills-
+  concurrent-streams fragility is real *during stream overlap* (interrupt teardown, or via #1).
+
+**Refuted (not bugs):**
+- **#9 segments_emitted mismatch** — increment is AFTER `_queue_pcm_segment`, and `flush_segment`
+  never passes <2-byte PCM (tail is padded), so the early-return can't produce a phantom count.
+- **#11 audio drift** — each chunk's render loop uses the same `t0` as its audio
+  (`ch.scheduledT0`), so they stay aligned per chunk; a cursor-behind state is a one-time audible
+  seam, NOT progressive lip-sync drift.
+- **#13 frame `turnLen` not validated** — WebSocket messages are atomic (no transport
+  truncation), and malformed frames are already caught/dropped. Harmless hardening only.
+
+**Overall:** a strong review — ~10/15 valid (2 critical), 2 overstated, 3 refuted. #1 is the
+must-fix (regression introduced this session). None of the confirmed bugs are fixed yet.
 
 ---
 
