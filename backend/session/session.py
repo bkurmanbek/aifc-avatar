@@ -458,7 +458,10 @@ class ClientSession:
             log_event(log, "barge_in_stop", session_id=self.session_id, request_id=self.active_turn_id, partial=text[:80])
             self.barge_in_triggered = True
             await self.interrupt(send_event=True)
-            self.ignore_audio_until = perf_counter() + 1.5
+            # Brief mute after a stop to swallow the avatar's audio tail/echo before we
+            # listen again. 1.0s (was 1.5s) — cancellation + SyncTalk abort stop the
+            # avatar fast now, so a shorter window lets the user re-ask sooner.
+            self.ignore_audio_until = perf_counter() + 1.0
             self._reset_interrupt_state()
             return
         now = perf_counter()

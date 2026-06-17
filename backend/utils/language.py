@@ -166,8 +166,12 @@ _BARGE_QUERY_TERMS = {
     "тіркеу", "лицензия", "баға", "төлем", "мерзім", "процесс", "қадам",
     "көмек", "сұрақ", "қайтала", "қайталаңыз",
 }
+# Catch-all barge-in rule (rule #10): a partial with no recognized query term still
+# interrupts if it has >= _MIN_INTERRUPTING_ALPHA_WORDS real words AND >= _CHARS letters.
+# Words stays at 3 as the noise guard (a stray 1-2 word mis-transcription won't fire);
+# chars lowered 14 -> 7 so genuine short queries ("explain visa", "what fees") interrupt.
 _MIN_INTERRUPTING_ALPHA_WORDS = 3
-_MIN_INTERRUPTING_ALPHA_CHARS = 14
+_MIN_INTERRUPTING_ALPHA_CHARS = 7
 _ZH_BARGE_QUERY_TERMS = (
     "什么", "怎么", "如何", "为什么", "什么时候", "哪里", "哪个", "请问",
     "解释", "告诉", "申请", "文件", "要求", "许可证", "签证", "金融科技",

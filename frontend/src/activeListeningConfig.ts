@@ -15,10 +15,15 @@ function readBoolean(name: string, fallback: boolean): boolean {
 
 export const activeListeningConfig = {
   enabled: readBoolean('VITE_ACTIVE_LISTENING_ENABLED', true),
-  positiveSpeechThreshold: readNumber('VITE_ACTIVE_POSITIVE_SPEECH_THRESHOLD', 0.35, 0.05, 0.95),
+  // 0.40 (was 0.35): less sensitive so room/background noise doesn't open the mic.
+  positiveSpeechThreshold: readNumber('VITE_ACTIVE_POSITIVE_SPEECH_THRESHOLD', 0.4, 0.05, 0.95),
+  // Kept low → wide ~0.12 hysteresis so a brief dip mid-word doesn't end speech early.
   negativeSpeechThreshold: readNumber('VITE_ACTIVE_NEGATIVE_SPEECH_THRESHOLD', 0.28, 0.01, 0.9),
+  // 800ms silence before turn-end: forgiving of natural pauses (don't cut off a thinker).
   redemptionMs: readNumber('VITE_ACTIVE_FINAL_SILENCE_MS', 800, 500, 6000),
-  minSpeechMs: readNumber('VITE_ACTIVE_MIN_RECORD_MS', 700, 500, 5000),
+  // 500ms (was 700): short queries ("visa?", "repeat") must not be dropped as misfires.
+  minSpeechMs: readNumber('VITE_ACTIVE_MIN_RECORD_MS', 500, 300, 5000),
+  // Onset buffer flushed on speech start so the first syllable isn't lost.
   preRollMs: readNumber('VITE_ACTIVE_PREROLL_MS', 800, 0, 3000),
   model: ((import.meta.env.VITE_ACTIVE_VAD_MODEL as string | undefined) === 'v5' ? 'v5' : 'legacy') as 'legacy' | 'v5',
 }
