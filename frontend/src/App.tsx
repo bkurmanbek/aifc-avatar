@@ -163,27 +163,40 @@ export default function App() {
     isBusyRef.current = true
     setMode('speaking')
     setIntroActive(true)
-    const finish = () => {
+    let settled = false
+    const finish = (reason: string, cls: string = 'ok') => {
+      if (settled) return
+      settled = true
       v.onended = null
       v.onerror = null
       setIntroActive(false)
       setMode('idle')
       setIsBusy(false)
       isBusyRef.current = false
-      log('intro done', 'ok')
+      log(`intro ${reason}`, cls)
+      // eslint-disable-next-line no-console
+      console.info('[intro]', reason, { code: v.error?.code, networkState: v.networkState, readyState: v.readyState, src: v.currentSrc })
     }
-    v.onended = finish
-    v.onerror = finish
+    v.onended = () => finish('done')
+    v.onerror = () => finish(`error code=${v.error?.code ?? '?'}`, 'err')
+    // Always (re)assign src + load so a stale/errored preload state can't poison play.
+    // The file is immutable + cached, so the reload is served from disk cache.
     const full = backendHttpUrl(url)
-    if (v.getAttribute('src') !== full) v.src = full
+    v.src = full
+    try { v.load() } catch { /* ignore */ }
     try { v.currentTime = 0 } catch { /* ignore */ }
     v.muted = false
     const p = v.play()
     if (p) {
-      p.catch(() => {
+      p.then(() => log('intro playing', 'ok')).catch((e: unknown) => {
         // Autoplay-with-sound blocked — show the clip muted rather than nothing.
+        const name = e instanceof Error ? e.name : String(e)
+        // eslint-disable-next-line no-console
+        console.warn('[intro] play() rejected, retrying muted:', name)
         v.muted = true
-        v.play().catch(finish)
+        v.play().then(() => log('intro playing (muted)', 'ok')).catch((e2: unknown) => {
+          finish(`blocked ${e2 instanceof Error ? e2.name : String(e2)}`, 'err')
+        })
       })
     }
   }, [log])
