@@ -384,6 +384,8 @@ export default function App() {
           // already interacted this session, play immediately.
           if (userInteractedRef.current) {
             playIntroVideo(msg.url)
+            // Listen during the intro, not after — same as the tap path (startIntro).
+            void micRef.current.ensureActiveListening()
           } else {
             pendingIntroUrlRef.current = msg.url
             preloadIntro(msg.url)
@@ -561,6 +563,10 @@ export default function App() {
     const url = pendingIntroUrlRef.current ?? lastIntroUrlRef.current
     pendingIntroUrlRef.current = null
     if (url) playIntroVideo(url)
+    // Begin active listening WHILE the intro plays (not after) so the user can speak /
+    // barge in immediately. This same tap is the user gesture that lets getUserMedia +
+    // the VAD start. ensureActiveListening no-ops if the mic is muted or already active.
+    void micRef.current.ensureActiveListening()
   }, [playback, playIntroVideo])
 
   // ── VAD bars ───────────────────────────────────────────────────
