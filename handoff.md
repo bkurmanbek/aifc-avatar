@@ -3,8 +3,55 @@
 _Session date: 2026-06-16. Read this first, then `CLAUDE.md`. This documents an end-to-end
 effort to kill avatar stuttering and chunk-transition gaps across the intro and answer paths._
 
-> **Update 2026-06-17 — resilience + control panel. See the section directly below.**
+> **Update 2026-06-17 (later) — public deploy + intro playback fix. See the FIRST section below.**
+> **Update 2026-06-17 — resilience + control panel. See the second section below.**
 > The stutter work (Phases 1–5) is unchanged and still current.
+
+---
+
+## Session 2026-06-17 (later) — Vercel/ngrok deploy + intro playback fix
+
+The demo is now served publicly: **frontend on Vercel**, **backend stays on the H200 box** exposed
+via an **ngrok static domain**. Full operational runbook is in **`DEPLOY.md`** (read that for URLs,
+env vars, systemd, reboot behavior). Key facts:
+
+- Frontend: `https://frontend-five-lemon-98.vercel.app` (Vercel project `bakytzhan-s-projects/frontend`,
+  root dir `frontend`). Single knob `VITE_BACKEND_ORIGIN` → drives WS URL (https→wss) **and** all
+  backend HTTP asset URLs (`frontend/src/utils.ts`: `BACKEND_ORIGIN`, `backendHttpUrl`, `backendWsUrl`).
+- Backend exposed at `https://outdoor-yearlong-edythe.ngrok-free.dev` (static domain).
+- Backend + ngrok run as **user systemd services** with linger (auto-start on boot); SyncTalk is
+  intentionally NOT auto-managed. Units in `deploy/systemd/`. The backend unit **must** set
+  `LD_LIBRARY_PATH=/home/admin-aifc/miniforge3/lib` (base-conda Python needs conda's libstdc++ under
+  systemd's clean env, else `CXXABI_1.3.15 not found`).
+- STT switched to **Soniox `stt-rt-v5`** (`config.env`); added optional `SONIOX_STT_ENDPOINT_SENSITIVITY`.
+
+**The intro-not-playing saga (now FIXED — commits `51356d2`, `a029879`, `4074a32`, plus earlier
+`f601535`/`5bbeffa`).** Worth reading because the symptom was misleading:
+- Browsers block autoplay-with-sound until a user gesture → intro is gated behind a full-screen
+  **"Tap to start" `<button>`** (a real onClick = guaranteed user activation; replaces the old fragile
+  `pointer-events:none` overlay + window-listener fall-through). Auto-presents on **every page refresh**;
+  the **dock intro play/stop button was removed** (per user) — stop the intro via the primary
+  interrupt button.
+- **Real root cause of the persistent failure:** the intro MP4 is served by the backend over
+  **ngrok-free**, which returns a **browser-warning interstitial HTML** (`text/html`, ~2.8 KB) to
+  requests with a *browser* User-Agent and no skip header. A `<video src>` can't send the
+  `ngrok-skip-browser-warning` header, so Chrome got HTML → `MEDIA_ERR_SRC_NOT_SUPPORTED` (code=4) /
+  `NotSupportedError`. **curl probes used curl's UA so they got the real MP4 — masking it for hours.**
+  Reproduce with `curl -A "Mozilla/5.0 ... Chrome/..." <intro-url>` → text/html.
+- **Fix:** `App.tsx loadIntroBlob()` fetches the MP4 via `fetch()` **with** the skip header (CORS open,
+  `ACAO: *`), wraps it in a blob object URL, and plays that — same pattern `useChunkPlayback` already
+  uses for the intro audio. Deduped/cached for the page lifetime; `preloadIntro` warms it on
+  `intro_video`; sticky activation from the tap allows sound across the async fetch.
+- **General gotcha:** ANY backend asset on ngrok-free loaded by a bare `<img>/<video>/<source>` hits
+  this — route it through a header-bearing fetch, or use a paid ngrok tier / custom domain.
+
+**Verification status:** builds clean; deployed to Vercel prod; deployed bundle confirmed to contain
+the blob-fetch code. Server-side confirmed: MP4 is valid (H.264 High + AAC LC, faststart), 206 Range +
+CORS OK with the skip header; **Chrome-UA request without the header returns the text/html interstitial**
+(the bug). **Awaiting the user's final in-browser confirmation that the intro plays with sound.**
+The 4 commits above are **committed locally but not pushed** — push needs the interactive VSCode
+credential helper (`git push origin main`). The Vercel deploy uploads local build directly, so the
+live site is current regardless.
 
 ---
 

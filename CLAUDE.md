@@ -142,6 +142,13 @@ The realtime answer path was reworked to eliminate stutter and chunk-transition 
 ### Intro is a prebuilt MP4
 The static intro is a combined H.264+AAC MP4 (`backend/intro.py` `build_intro_video`/`ensure_intro_video`, cached at `cache/intro/video/<avatar>/intro.mp4`), served at `/intro-video/...` and played in a `<video id="introVid">` — hardware-decoded, no per-frame JS. `session.py run_intro` sends `{type:'intro_video',url}` when a valid MP4 exists; falls back to the canvas frame-cache path otherwise. ffmpeg resolves via `_ffmpeg_bin()` (synctalk2d conda env).
 
+**Frontend playback (`App.tsx`):** the intro auto-presents on every page load behind a full-screen **"Tap to start" `<button>`** (`awaitingIntroTap` → `AvatarStage` overlay). Its onClick (`startIntro`) is a real user gesture, which is required to play with sound. There is **no dock intro button** — stop the intro via the primary interrupt control. Two non-obvious constraints, do NOT regress them:
+- **Fetch the MP4 as a blob, never as a bare `<video src>`.** `loadIntroBlob()` does `fetch(..., {headers:{'ngrok-skip-browser-warning':'true'}})` → `URL.createObjectURL(blob)` → `v.src`. A bare `<video src>` to the ngrok-tunneled backend gets ngrok-free's **interstitial HTML** (browser UA, no skip header) → `MEDIA_ERR_SRC_NOT_SUPPORTED` (code=4). Same hazard for any backend asset loaded by a bare `<img>/<video>/<source>` on ngrok-free.
+- **Start the intro from a user-gesture handler** (the overlay button), not from the WS `intro_video` message handler — autoplay-with-sound is blocked otherwise. `preloadIntro` warms the blob on `intro_video`; sticky activation from the tap permits sound across the async fetch.
+
+### Public deployment (Vercel + ngrok) — see `DEPLOY.md`
+Frontend on **Vercel** (`frontend-five-lemon-98.vercel.app`), backend stays on the H200 box exposed via an **ngrok static domain** (`outdoor-yearlong-edythe.ngrok-free.dev`). Single env knob `VITE_BACKEND_ORIGIN` drives the WS URL and all backend asset URLs (`frontend/src/utils.ts`). Backend + ngrok run as **user systemd units** (`deploy/systemd/`, linger-enabled); the backend unit must set `LD_LIBRARY_PATH=/home/admin-aifc/miniforge3/lib`. `DEPLOY.md` is the runbook.
+
 ### SyncTalk checkpoint
 Current: `aifc-avatar-5-3min_exp_6` — 5747 frames (229s head cycle), better visual quality than the previous 27s cycle checkpoint. Located at `/home/admin-aifc/SyncTalk_2D/checkpoint/aifc-avatar-5-3min_exp_6/`.
 
@@ -181,3 +188,5 @@ cache/                — semantic answer cache
 - Do not add comma-based sentence splits to `voice_chunker.py` — causes unnatural TTS pauses
 - Do not mock the external RAG or Gemini responses in integration paths — use real endpoints
 - Do not import from `/home/admin-aifc/avatar_system` (production stack) — keep stacks separate
+- Do not load backend assets via a bare `<video src>`/`<img>`/`<source>` when behind ngrok-free — you get the interstitial HTML (code=4). Use a header-bearing blob fetch (see intro section)
+- Do not start the intro from the WS `intro_video` handler — autoplay-with-sound needs a user gesture; start it from the "Tap to start" button's onClick
