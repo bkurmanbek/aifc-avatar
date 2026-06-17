@@ -25,6 +25,10 @@ from ..utils.debug_io import save_tts_chunk as _save_tts_chunk_debug
 log = logging.getLogger(__name__)
 
 _AVATAR_WORKER_COUNT = 2
+# A segment is retried at most this many times, and only when no frames were emitted
+# on the failed attempt (retrying after partial output would duplicate frames).
+_AVATAR_SEGMENT_MAX_ATTEMPTS = 2
+_AVATAR_SEGMENT_RETRY_DELAY_S = 0.1
 _SYNCTALK_SEMAPHORE: asyncio.Semaphore | None = None
 
 
@@ -309,38 +313,78 @@ class ResponseStream:
             media_idx, audio_wav, start_frame = item
             frame_count = 0
             error_sent = False
+            attempts = 0
             started = perf_counter()
             try:
                 log_event(log, "avatar_chunk_start", request_id=self._turn_id, chunk=media_idx, bytes=len(audio_wav))
-                async with _synctalk_semaphore():
-                    async for frame in self._synctalk.infer_stream(
-                        audio_wav,
-                        priority=0 if media_idx == 0 else 1,
-                        chunk_idx=media_idx,
-                        start_frame=start_frame,
-                    ):
-                        frame_count += 1
-                        if frame_count == 1:
+                # Retry a segment ONCE on a transient failure, but only when no frames
+                # were emitted yet — re-running after partial output would duplicate
+                # frames. The head-pose start_frame is identical across attempts, so a
+                # clean retry resumes the same pose (no drift). A single frame timeout
+                # otherwise drops the whole ~1.5s segment (audible + visible jump).
+                while attempts < _AVATAR_SEGMENT_MAX_ATTEMPTS:
+                    attempts += 1
+                    frame_count = 0
+                    try:
+                        async with _synctalk_semaphore():
+                            async for frame in self._synctalk.infer_stream(
+                                audio_wav,
+                                priority=0 if media_idx == 0 else 1,
+                                chunk_idx=media_idx,
+                                start_frame=start_frame,
+                            ):
+                                frame_count += 1
+                                if frame_count == 1:
+                                    log_event(
+                                        log,
+                                        "avatar_first_frame",
+                                        request_id=self._turn_id,
+                                        chunk=media_idx,
+                                        attempt=attempts,
+                                        latency_ms=(perf_counter() - started) * 1000,
+                                    )
+                                # SyncTalk yields base64 JPEG; decode here and ship raw bytes as a
+                                # binary WS frame so the browser skips JSON.parse + atob per frame.
+                                await self._writer.send_frame_binary(
+                                    media_idx, base64.b64decode(frame), turn_id=self._turn_id
+                                )
+                    except ClientClosedError:
+                        raise
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        if frame_count == 0 and attempts < _AVATAR_SEGMENT_MAX_ATTEMPTS:
                             log_event(
                                 log,
-                                "avatar_first_frame",
+                                "avatar_chunk_retry",
                                 request_id=self._turn_id,
                                 chunk=media_idx,
-                                latency_ms=(perf_counter() - started) * 1000,
+                                attempt=attempts,
+                                reason=str(exc),
+                                level=logging.WARNING,
                             )
-                        # SyncTalk yields base64 JPEG; decode here and ship raw bytes as a
-                        # binary WS frame so the browser skips JSON.parse + atob per frame.
-                        await self._writer.send_frame_binary(
-                            media_idx, base64.b64decode(frame), turn_id=self._turn_id
+                            await asyncio.sleep(_AVATAR_SEGMENT_RETRY_DELAY_S)
+                            continue
+                        error_sent = True
+                        log.exception("streaming avatar segment failed: chunk=%s", media_idx)
+                        await self._send_media_error(media_idx, f"SyncTalk failed: {exc}")
+                        break
+                    # Stream finished without raising.
+                    if frame_count > 0:
+                        break
+                    if attempts < _AVATAR_SEGMENT_MAX_ATTEMPTS:
+                        log_event(
+                            log,
+                            "avatar_chunk_retry",
+                            request_id=self._turn_id,
+                            chunk=media_idx,
+                            attempt=attempts,
+                            reason="no_frames",
+                            level=logging.WARNING,
                         )
-            except ClientClosedError:
-                raise
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                error_sent = True
-                log.exception("streaming avatar segment failed: chunk=%s", media_idx)
-                await self._send_media_error(media_idx, f"SyncTalk failed: {exc}")
+                        await asyncio.sleep(_AVATAR_SEGMENT_RETRY_DELAY_S)
+                        continue
+                    break
             finally:
                 if frame_count == 0 and not error_sent:
                     await self._send_media_error(media_idx, "SyncTalk returned no frames")
@@ -349,6 +393,7 @@ class ResponseStream:
                     "avatar_chunk_done",
                     request_id=self._turn_id,
                     chunk=media_idx,
+                    attempts=attempts,
                     latency_ms=(perf_counter() - started) * 1000,
                     frames=frame_count,
                 )
