@@ -57,6 +57,7 @@ class _SpokenFieldExtractor:
         self._state = "searching"
         self._buf = ""
         self._ubuf = ""
+        self._high_surrogate: int | None = None  # pending \uD800-\uDBFF awaiting its low half
 
     @property
     def done(self) -> bool:
@@ -122,10 +123,33 @@ class _SpokenFieldExtractor:
             if len(self._ubuf) == 4:
                 self._state = "in_string"
                 try:
-                    return chr(int(self._ubuf, 16))
+                    code = int(self._ubuf, 16)
                 except ValueError:
-                    pass
+                    return self._flush_high_surrogate()
+                # Non-BMP chars (e.g. emoji) are encoded as a surrogate PAIR of two \u
+                # escapes. Decoding each half independently yields lone surrogates that
+                # crash a later .encode('utf-8') (TTS body / logging). Combine the pair.
+                if 0xD800 <= code <= 0xDBFF:           # high surrogate → wait for the low half
+                    prefix = self._flush_high_surrogate()
+                    self._high_surrogate = code
+                    return prefix
+                if 0xDC00 <= code <= 0xDFFF:           # low surrogate
+                    if self._high_surrogate is not None:
+                        combined = 0x10000 + ((self._high_surrogate - 0xD800) << 10) + (code - 0xDC00)
+                        self._high_surrogate = None
+                        return chr(combined)
+                    return "�"                    # lone low surrogate → replacement char
+                prefix = self._flush_high_surrogate()  # any pending high was unpaired
+                return prefix + chr(code)
             return ""
+        return ""
+
+    def _flush_high_surrogate(self) -> str:
+        """A pending high surrogate that wasn't followed by a low half is unpaired —
+        emit the Unicode replacement char rather than a crash-inducing lone surrogate."""
+        if self._high_surrogate is not None:
+            self._high_surrogate = None
+            return "�"
         return ""
 
 

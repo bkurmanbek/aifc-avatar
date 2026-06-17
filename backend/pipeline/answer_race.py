@@ -101,7 +101,7 @@ async def _external_only_race(
     except asyncio.TimeoutError:
         log.warning(
             "external RAG first response timeout after %.2fs query=%r",
-            EXTERNAL_RAG_FIRST_RESPONSE_TIMEOUT_S,
+            max(0.5, EXTERNAL_RAG_TIMEOUT_S + GEMINI_RAG_MAX_WAIT_MS / 1000),
             query[:160],
         )
         candidate = None

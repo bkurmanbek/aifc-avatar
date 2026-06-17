@@ -171,6 +171,15 @@ export default function App() {
     return p
   }, [])
 
+  // Free the intro-MP4 blob on unmount so it isn't pinned in memory beyond the page's
+  // life (the browser also revokes on navigation; this covers embedded/non-kiosk use).
+  useEffect(() => () => {
+    if (introObjUrlRef.current) {
+      URL.revokeObjectURL(introObjUrlRef.current)
+      introObjUrlRef.current = null
+    }
+  }, [])
+
   // Warm the blob ahead of the tap so play() inside the gesture is instant.
   const preloadIntro = useCallback((url: string) => {
     void loadIntroBlob(url)

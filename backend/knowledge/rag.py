@@ -105,11 +105,14 @@ def _retrieve_with_fast_path(query: str, plan: object) -> tuple[list[dict], dict
 
     language = normalize_lang(getattr(plan, "answer_language", "en"))
     fast_hit: dict[str, Any] | None = None
-    if language == "en":
-        hit = _faq_fast_path_lookup(query, language)
-        if hit and float(hit.get("similarity", 0.0)) >= 0.9:
-            hit["chunks"] = chunks
-            fast_hit = hit
+    # FAQ fast-path for ALL supported languages, not just English: _FAQ_ENTRIES contain
+    # ru/kk/zh entries and _faq_fast_path_lookup filters by language. The old `== "en"`
+    # gate made non-English exact matches skip the high-confidence (>=0.9) shortcut and
+    # fall through to full RAG+Gemini (slower, worse-answer risk) for no reason.
+    hit = _faq_fast_path_lookup(query, language)
+    if hit and float(hit.get("similarity", 0.0)) >= 0.9:
+        hit["chunks"] = chunks
+        fast_hit = hit
     return chunks, fast_hit
 
 

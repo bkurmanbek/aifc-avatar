@@ -126,6 +126,9 @@ class ClientSession:
     tts_prewarm_task: asyncio.Task | None = None
     _stt_start_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     pipeline_task: asyncio.Task | None = None
+    # Strong refs to background teardown drains so the GC can't collect them mid-await
+    # (asyncio holds only a weak ref to bare create_task() results).
+    _drain_tasks: set[asyncio.Task] = field(default_factory=set, repr=False)
     active_metrics: TurnMetrics | None = None
     active_turn_id: str | None = None
     ignore_audio_until: float = 0.0
@@ -398,6 +401,7 @@ class ClientSession:
 
     async def run_intro(self, intro_blocks: list[IntroBlock], intro_token: str | None = None) -> None:
         turn_id = uuid4().hex
+        current_task = asyncio.current_task()
         metrics = TurnMetrics(started_at=perf_counter(), mode="intro")
         full_text = "\n\n".join(block.text for block in intro_blocks).strip()
         intro_token_played = False
@@ -444,9 +448,14 @@ class ClientSession:
         finally:
             if intro_token and not intro_token_played:
                 _clear_intro_token_in_progress(intro_token)
-            self.pipeline_task = None
-            self.active_metrics = None
-            self.active_turn_id = None
+            # Only clear shared turn state if it still points at THIS task. interrupt()
+            # detaches pipeline_task and drains us in the background, so a slow teardown
+            # can finish AFTER the next turn was assigned — nulling it here would clobber
+            # the live turn (barge-in/Stop would silently stop working for it).
+            if self.pipeline_task is current_task:
+                self.pipeline_task = None
+                self.active_metrics = None
+                self.active_turn_id = None
             self.writer.clear_active_turn(turn_id)
 
     async def on_meaningful_partial(self, text: str) -> None:
@@ -497,7 +506,12 @@ class ClientSession:
         self.writer.clear_active_turn()
         task = self.pipeline_task
         # Detach immediately so a new turn / the caller never sees a stale pipeline.
+        # Clear the turn-scoped state here too: the cancelled task's `finally` now only
+        # clears state it still owns (guarded by `is current_task`), so it won't do it
+        # for us. A new turn started right after will set its own values.
         self.pipeline_task = None
+        self.active_turn_id = None
+        self.active_metrics = None
         if task is not None and not task.done():
             log_event(log, "pipeline_cancel_requested", session_id=self.session_id, request_id=self.active_turn_id, send_event=send_event)
             task.cancel()
@@ -509,8 +523,11 @@ class ClientSession:
             if pending:
                 log_event(log, "pipeline_cancel_slow", session_id=self.session_id, request_id=self.active_turn_id)
                 # Drain in the background so the exception is retrieved (no warnings)
-                # and SyncTalk finishes aborting without holding up this loop.
-                asyncio.create_task(self._drain_cancelled(task))
+                # and SyncTalk finishes aborting without holding up this loop. Keep a
+                # strong ref (asyncio only weak-refs tasks) so the GC can't drop it mid-await.
+                drain = asyncio.create_task(self._drain_cancelled(task))
+                self._drain_tasks.add(drain)
+                drain.add_done_callback(self._drain_tasks.discard)
             else:
                 exc = task.exception() if not task.cancelled() else None
                 if exc is not None:
@@ -821,6 +838,7 @@ class ClientSession:
 
     async def run_query(self, query: str, language: str, metrics: TurnMetrics, interrupted_input: bool = False) -> None:
         turn_id = uuid4().hex
+        current_task = asyncio.current_task()
         stream: ResponseStream | None = None
         self.active_metrics = metrics
         self.active_turn_id = turn_id
@@ -938,11 +956,18 @@ class ClientSession:
             )
             chat = str(answer_payload.get("chat") or spoken).strip() or spoken
             _save_response_debug(turn_id, spoken, chat)
-            winner_already_streamed = (
-                spoken_streaming_active
-                and race_result is not None
-                and race_result.winner.source in ("gemini_local_rag", "external_internal_rag")
-            )
+            # If ANY spoken text was already streamed to TTS via on_spoken_delta, do not
+            # re-emit the full winner text — that would double the audio. Key off the fact
+            # that streaming happened, NOT the winner's source: Gemini streams its spoken
+            # field as it generates, but a faster source (FAQ/cache) or the fallback can
+            # still win the race afterwards. Re-emitting then layered the winner's text on
+            # top of the already-spoken Gemini fragment (garbled/doubled audio).
+            winner_already_streamed = spoken_streaming_active
+            if winner_already_streamed and race_result is not None and race_result.winner.source not in ("gemini_local_rag", "external_internal_rag"):
+                # Rare race: a non-streaming source won after Gemini had already streamed a
+                # fragment. We keep the streamed fragment (can't un-speak it) and skip the
+                # winner's text to avoid doubling — log it so it's visible if it recurs.
+                log_event(log, "spoken_stream_winner_mismatch", session_id=self.session_id, request_id=turn_id, winner_source=race_result.winner.source, level=logging.WARNING)
             if not winner_already_streamed:
                 await stream.emit_spoken_text(spoken)
             if chat:
@@ -1027,7 +1052,10 @@ class ClientSession:
                 self.history.pop()
             await self.writer.send({"type": "error", "text": "Response generation failed", "turn_id": turn_id})
         finally:
-            self.pipeline_task = None
-            self.active_metrics = None
-            self.active_turn_id = None
+            # Only clear shared turn state if it still points at THIS task — a background
+            # drain of a slow cancelled turn must not null out a newer turn's state.
+            if self.pipeline_task is current_task:
+                self.pipeline_task = None
+                self.active_metrics = None
+                self.active_turn_id = None
             self.writer.clear_active_turn(turn_id)

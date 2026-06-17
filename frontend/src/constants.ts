@@ -19,6 +19,10 @@ export const CANVAS_W = readNumber('VITE_CANVAS_W', 540, 160, 2160)
 export const CANVAS_H = readNumber('VITE_CANVAS_H', 960, 160, 3840)
 export const RECONNECT_BASE_MS = readNumber('VITE_RECONNECT_BASE_MS', 1500, 250, 30000)
 export const RECONNECT_MAX_MS = readNumber('VITE_RECONNECT_MAX_MS', 30000, 1000, 120000)
+// Steady retry interval while the backend is "busy" (single-session gate). Not the fast
+// base (avoids hammering the box) and not the long backoff (keeps admission prompt once a
+// slot frees). Jitter is applied per attempt to desync multiple waiting clients.
+export const BUSY_RECONNECT_MS = readNumber('VITE_BUSY_RECONNECT_MS', 3000, 1000, 30000)
 // Application-level heartbeat: send a ping every WS_HEARTBEAT_MS and force a reconnect
 // if no traffic (pong or any message) arrives within WS_HEARTBEAT_TIMEOUT_MS. Catches
 // half-open sockets far faster than the TCP timeout.

@@ -47,9 +47,11 @@ class SessionGate:
         self._idle = float(idle_evict_s)
         self._active: dict[str, _Entry] = {}
         self._lock = asyncio.Lock()
+        self._disconnect_tasks: set[asyncio.Task] = set()
 
     async def acquire(self, session) -> bool:
         """Try to claim a slot for ``session``. Returns True if admitted."""
+        to_disconnect = []
         async with self._lock:
             now = time.monotonic()
             # Evict holders that are no longer usable so the slot frees promptly:
@@ -57,29 +59,42 @@ class SessionGate:
             #    force-closed and reconnected before the old session's finally ran —
             #    without this the reconnect would wrongly get "busy").
             #  - idle: an abandoned-but-open tab past the idle timeout.
-            stale = []
-            for sid, e in self._active.items():
+            # We only remove entries from the map here; the networked force_disconnect is
+            # done OUTSIDE the lock (below) so a hung/half-open socket can't wedge the lock
+            # and serialize admission/release for every other client.
+            for sid, e in list(self._active.items()):
                 if sid == session.session_id:
                     continue
-                if _ws_disconnected(e.session) or now - e.last_activity > self._idle:
-                    stale.append(e)
-            for e in stale:
-                self._active.pop(e.session.session_id, None)
-                log_event(log, "session_evict", session_id=e.session.session_id,
-                          reason="dead" if _ws_disconnected(e.session) else "idle")
-                with contextlib.suppress(Exception):
-                    await e.session.force_disconnect("evicted")
+                dead = _ws_disconnected(e.session)
+                if dead or now - e.last_activity > self._idle:
+                    self._active.pop(sid, None)
+                    to_disconnect.append(e.session)
+                    log_event(log, "session_evict", session_id=sid, reason="dead" if dead else "idle")
 
             existing = self._active.get(session.session_id)
             if existing is not None:
                 existing.last_activity = now
-                return True
-            if len(self._active) >= self._max:
+                admitted = True
+            elif len(self._active) >= self._max:
                 log_event(log, "session_rejected_busy", session_id=session.session_id, active=len(self._active))
-                return False
-            self._active[session.session_id] = _Entry(session)
-            log_event(log, "session_acquired", session_id=session.session_id, active=len(self._active))
-            return True
+                admitted = False
+            else:
+                self._active[session.session_id] = _Entry(session)
+                log_event(log, "session_acquired", session_id=session.session_id, active=len(self._active))
+                admitted = True
+
+        # Outside the lock: disconnect evicted holders as bounded background tasks.
+        for evicted in to_disconnect:
+            self._spawn_disconnect(evicted)
+        return admitted
+
+    def _spawn_disconnect(self, session) -> None:
+        async def _run() -> None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(session.force_disconnect("evicted"), timeout=5.0)
+        task = asyncio.create_task(_run())
+        self._disconnect_tasks.add(task)               # strong ref so it isn't GC'd
+        task.add_done_callback(self._disconnect_tasks.discard)
 
     def touch(self, session_id: str) -> None:
         """Mark real activity on a session (keeps it from being evicted)."""

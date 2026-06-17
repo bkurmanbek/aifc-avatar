@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -443,10 +444,26 @@ def _tail_text(path: Path, limit: int = 600) -> str:
         return ""
 
 
+# Single-flight guard for the (blocking, thread-run) video build. Both prebuild_intro_cache
+# (startup) and ensure_intro_video (first session) can fire concurrently for the same avatar;
+# without this they'd build to the SAME temp paths at once and corrupt/clobber the output.
+# A threading.Lock (not asyncio) because build_intro_video runs in a thread via to_thread.
+_INTRO_VIDEO_BUILD_LOCK = threading.Lock()
+
+
 def build_intro_video(blocks: list[IntroBlock]) -> Path | None:
     """Build (or rebuild) the combined intro MP4 from cached frames + audio. Blocking."""
     if not blocks:
         return None
+    with _INTRO_VIDEO_BUILD_LOCK:
+        # Re-check inside the lock: a concurrent builder may have just finished, in which
+        # case we return the freshly-built file instead of rebuilding to shared temps.
+        if intro_video_is_valid(blocks):
+            return intro_video_path()
+        return _build_intro_video_locked(blocks)
+
+
+def _build_intro_video_locked(blocks: list[IntroBlock]) -> Path | None:
     frames_all: list[str] = []
     for block in blocks:
         frames = load_intro_frames_from_cache(block)

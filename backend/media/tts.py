@@ -286,8 +286,14 @@ class SonioxRealtimeTTS:
                 return
             except Exception as exc:
                 last_error = exc
-                await self._close_ws()
                 _drain_queue(queue)
+                # Only tear down the SHARED socket if it's genuinely dead. The socket
+                # multiplexes all concurrent TTS streams by stream_id; closing it for a
+                # transient per-stream send error would also kill sibling streams that
+                # were fine (their reader_loop ends and their synthesis aborts mid-word).
+                # If the socket is still open, keep it and just retry this stream's config.
+                if not _ws_is_open(self._ws):
+                    await self._close_ws()
                 if attempt == 0:
                     log.warning("Retrying Soniox TTS stream start after connection failure: %s", exc)
                     continue

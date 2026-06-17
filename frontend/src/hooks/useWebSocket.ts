@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
 import type { WsInbound } from '../types'
-import { RECONNECT_BASE_MS, RECONNECT_MAX_MS, WS_HEARTBEAT_MS, WS_HEARTBEAT_TIMEOUT_MS } from '../constants'
+import { RECONNECT_BASE_MS, RECONNECT_MAX_MS, BUSY_RECONNECT_MS, WS_HEARTBEAT_MS, WS_HEARTBEAT_TIMEOUT_MS } from '../constants'
 import { BACKEND_ORIGIN, backendWsUrl } from '../utils'
 
 let pageIntroToken: string | null = null
@@ -151,14 +151,17 @@ export function useWebSocket(handlers: WsHandlers) {
 
       activeTargetRef.current = primaryWsUrl
       reconnectDelayRef.current = Math.min(reconnectDelayRef.current * 1.6, RECONNECT_MAX_MS)
+      // Apply ±20% jitter so multiple waiting clients don't reconnect in lockstep (avoids
+      // a synchronized connect "storm" against the single-session gate).
+      const jittered = Math.round(reconnectDelayRef.current * (0.8 + Math.random() * 0.4))
       handlersRef.current.onError?.({
         source: 'websocket.reconnect',
-        message: `websocket reconnecting in ${Math.round(reconnectDelayRef.current)}ms`,
-        detail: { target: primaryWsUrl, delayMs: reconnectDelayRef.current },
+        message: `websocket reconnecting in ${jittered}ms`,
+        detail: { target: primaryWsUrl, delayMs: jittered },
       })
       reconnectTimerRef.current = window.setTimeout(() => {
         connectRef.current(primaryWsUrl)
-      }, reconnectDelayRef.current)
+      }, jittered)
     },
     [fallbackWsUrlWithToken, primaryWsUrl, shouldTryFallback],
   )
@@ -199,7 +202,10 @@ export function useWebSocket(handlers: WsHandlers) {
         activeTargetRef.current = wsUrl
       }
       handlersRef.current.onConnected()
-      reconnectDelayRef.current = RECONNECT_BASE_MS
+      // NOTE: do NOT reset the backoff here. A "busy" rejection also fires onopen (the
+      // server accepts, then sends busy + closes), so resetting here would make busy
+      // clients retry at the fast base forever. We reset only on a proven-useful message
+      // (see onmessage); busy sets a steady interval instead.
       fallbackAttemptedRef.current = false
       startHeartbeat(ws)
     }
@@ -262,8 +268,17 @@ export function useWebSocket(handlers: WsHandlers) {
       }
       try {
         const d = JSON.parse(event.data) as WsInbound
+        const dtype = (d as { type?: string }).type
         // Heartbeat reply — already re-armed the watchdog above; don't forward it.
-        if ((d as { type?: string }).type === 'pong') return
+        if (dtype === 'pong') return
+        if (dtype === 'busy') {
+          // Single-session gate rejected us. Retry at a steady interval, not the fast base.
+          reconnectDelayRef.current = BUSY_RECONNECT_MS
+        } else {
+          // A real app message proves this connection is useful → reset backoff so a
+          // future genuine drop reconnects quickly.
+          reconnectDelayRef.current = RECONNECT_BASE_MS
+        }
         handlersRef.current.onMessage(d)
       } catch (error) {
         handlersRef.current.onError?.({

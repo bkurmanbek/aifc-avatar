@@ -203,7 +203,10 @@ export function useChunkPlayback(
     }
     createImageBitmap(blob).then(bitmap => {
       ch.bitmapPending.delete(frameIdx)
-      ch.bitmapCache[frameIdx] = bitmap
+      // Close-before-overwrite: ensureBitmapReady may have already decoded this frame.
+      // Overwriting without closing orphans a GPU-backed bitmap until GC (a leak).
+      if (ch.bitmapCache[frameIdx]) bitmap.close?.()
+      else ch.bitmapCache[frameIdx] = bitmap
     }).catch(() => {
       ch.bitmapPending.delete(frameIdx)
     })
@@ -214,8 +217,12 @@ export function useChunkPlayback(
   // stutter while createImageBitmap is still in flight.
   const ensureBitmapReady = useCallback(async (ch: ChunkState, frameIdx: number) => {
     if (ch.bitmapCache[frameIdx]) return
+    // If preloadBitmap is already decoding this frame, don't decode a second copy.
+    if (ch.bitmapPending.has(frameIdx)) return
     const frame = ch.frames[frameIdx]
     if (!frame) return
+    // Register so a concurrent preloadBitmap skips this frame (its guard checks pending).
+    ch.bitmapPending.add(frameIdx)
     try {
       let blob: Blob
       if (frame instanceof Blob) {
