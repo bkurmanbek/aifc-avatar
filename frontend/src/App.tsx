@@ -45,7 +45,6 @@ export default function App() {
   const [connectedAt, setConnectedAt] = useState<number | null>(null)
   const [connectedSeconds, setConnectedSeconds] = useState(0)
   const [sttReady, setSttReady] = useState(false)
-  const [introAvailable, setIntroAvailable] = useState(false)
   const [awaitingIntroTap, setAwaitingIntroTap] = useState(false)
   const [lastLatencyMs, setLastLatencyMs] = useState<number | null>(null)
 
@@ -74,6 +73,7 @@ export default function App() {
   // first tap/click, then play it with audio (see the gesture effect below).
   const userInteractedRef = useRef(false)
   const pendingIntroUrlRef = useRef<string | null>(null)
+  const awaitingIntroTapRef = useRef(false)
   const idleTimerRef = useRef<{ reset: () => void; clear: () => void }>({ reset: () => {}, clear: () => {} })
 
   useEffect(() => {
@@ -82,7 +82,8 @@ export default function App() {
     activeListeningRef.current = activeListening
     micEnabledRef.current = micEnabled
     sttReadyRef.current = sttReady
-  }, [isBusy, isListening, activeListening, micEnabled, sttReady])
+    awaitingIntroTapRef.current = awaitingIntroTap
+  }, [isBusy, isListening, activeListening, micEnabled, sttReady, awaitingIntroTap])
 
   // ── Helpers ───────────────────────────────────────────────────
   const log = useCallback((text: string, cls?: string) => {
@@ -139,8 +140,22 @@ export default function App() {
     setIntroActive(false)
   }, [])
 
-  // Play (or replay) the prebuilt intro MP4. Used both by the backend `intro_video`
-  // message and by the manual intro button in the control dock.
+  // Buffer the intro MP4 ahead of the tap so play() inside the gesture is instant
+  // (and so the fetch happens up front — visible as a GET /intro-video in the logs).
+  // Kept muted with no play() call, so it does not trip the autoplay-with-sound block.
+  const preloadIntro = useCallback((url: string) => {
+    const v = introVidRef.current
+    if (!v) return
+    const full = backendHttpUrl(url)
+    if (v.getAttribute('src') === full) return
+    v.preload = 'auto'
+    v.muted = true
+    v.src = full
+    try { v.load() } catch { /* ignore */ }
+  }, [])
+
+  // Play (or replay) the prebuilt intro MP4. MUST be called from within a user-gesture
+  // handler (the tap-to-start overlay) so the browser allows playback with sound.
   const playIntroVideo = useCallback((url: string) => {
     const v = introVidRef.current
     if (!v) return
@@ -159,34 +174,20 @@ export default function App() {
     }
     v.onended = finish
     v.onerror = finish
-    v.src = backendHttpUrl(url)
-    v.currentTime = 0
+    const full = backendHttpUrl(url)
+    if (v.getAttribute('src') !== full) v.src = full
+    try { v.currentTime = 0 } catch { /* ignore */ }
     v.muted = false
-    v.play().catch(() => {
-      // Autoplay-with-sound blocked — show the clip muted rather than nothing.
-      v.muted = true
-      v.play().catch(finish)
-    })
+    const p = v.play()
+    if (p) {
+      p.catch(() => {
+        // Autoplay-with-sound blocked — show the clip muted rather than nothing.
+        v.muted = true
+        v.play().catch(finish)
+      })
+    }
   }, [log])
 
-  // Dock button: stop the intro if it's playing, otherwise replay the last one.
-  const toggleIntro = useCallback(() => {
-    idleTimerRef.current.reset()
-    if (introActive) {
-      stopIntroVideo()
-      setMode('idle')
-      setIsBusy(false)
-      isBusyRef.current = false
-      return
-    }
-    if (isBusyRef.current) {
-      log('wait for the current response to finish', 'err')
-      return
-    }
-    const url = lastIntroUrlRef.current
-    if (!url) return
-    playIntroVideo(url)
-  }, [introActive, log, playIntroVideo, stopIntroVideo])
 
   const sendTextPrompt = useCallback((text: string) => {
     setInputText('')
@@ -322,16 +323,16 @@ export default function App() {
         case 'intro_video': {
           if (isStaleTurn(msg.turn_id)) return
           // Hardware-decoded intro clip — bypasses the canvas frame pipeline entirely.
-          // Remember the URL so the dock's intro button can replay it on demand.
           lastIntroUrlRef.current = msg.url
-          setIntroAvailable(true)
           // Autoplay-with-sound is blocked before a user gesture. If the user hasn't
-          // interacted yet, hold the intro and show "Tap to start"; the gesture handler
-          // will play it with audio. Otherwise play immediately.
+          // interacted yet, buffer the clip and show the full-screen "Tap to start"
+          // overlay; its onClick (a real gesture) plays it with audio. If the user has
+          // already interacted this session, play immediately.
           if (userInteractedRef.current) {
             playIntroVideo(msg.url)
           } else {
             pendingIntroUrlRef.current = msg.url
+            preloadIntro(msg.url)
             setAwaitingIntroTap(true)
           }
           break
@@ -495,6 +496,18 @@ export default function App() {
     stopPlaybackRef.current = playback.stopPlayback
     playbackRef.current = playback
   }, [playback])
+
+  // Single source of truth for starting the intro: invoked directly from the
+  // tap-to-start overlay's onClick, so it always runs in a genuine user-gesture
+  // context (audio unlocked). The overlay auto-shows on every page load.
+  const startIntro = useCallback(() => {
+    userInteractedRef.current = true
+    try { playback.ensureAudioContext() } catch { /* never let an audio hiccup block the video */ }
+    setAwaitingIntroTap(false)
+    const url = pendingIntroUrlRef.current ?? lastIntroUrlRef.current
+    pendingIntroUrlRef.current = null
+    if (url) playIntroVideo(url)
+  }, [playback, playIntroVideo])
 
   // ── VAD bars ───────────────────────────────────────────────────
   const updateVAD = useCallback((level: number) => {
@@ -859,22 +872,15 @@ export default function App() {
     idleTimerRef.current = idleTimer
   }, [idleTimer])
 
-  // Persistent gesture listener that unlocks audio on any tap/key. A deferred intro plays
-  // WITH SOUND from inside the gesture (autoplay-with-sound is blocked otherwise) — this
-  // branch must run even while isBusy is true, because the intro turn sets isBusy via
-  // response_start. Otherwise (idle), the gesture starts active listening. The listener is
-  // NOT gated on isBusy at registration; the listening branch is guarded by isBusyRef.
+  // Persistent gesture listener that unlocks audio on any tap/key and, when idle, starts
+  // active listening. The intro itself is started by the tap-to-start overlay's own
+  // onClick (see startIntro) so it runs in a guaranteed user-gesture context; this
+  // listener only marks that the user has interacted and never touches the intro.
   useEffect(() => {
     const onGesture = () => {
       userInteractedRef.current = true
       playback.ensureAudioContext()
-      const pending = pendingIntroUrlRef.current
-      if (pending) {
-        pendingIntroUrlRef.current = null
-        setAwaitingIntroTap(false)
-        playIntroVideo(pending)  // within the gesture's call stack → audio allowed
-        return
-      }
+      if (awaitingIntroTapRef.current) return  // the overlay button handles the intro
       if (!isBusyRef.current && micEnabledRef.current && !activeListeningRef.current && !isListeningRef.current) {
         void micRef.current.ensureActiveListening()
       }
@@ -885,7 +891,7 @@ export default function App() {
       window.removeEventListener('pointerdown', onGesture)
       window.removeEventListener('keydown', onGesture)
     }
-  }, [playback, playIntroVideo])
+  }, [playback])
 
   // ── Keyboard shortcuts ───────────────────────────────────────
   useEffect(() => {
@@ -1142,9 +1148,8 @@ export default function App() {
                 idleVideoRef={idleVidRef}
                 introVideoRef={introVidRef}
                 introActive={introActive}
-                introAvailable={introAvailable}
                 awaitingIntroTap={awaitingIntroTap}
-                onToggleIntro={toggleIntro}
+                onStartIntro={startIntro}
                 speakCanvasRef={speakCvsRef}
                 mode={mode}
                 micEnabled={micEnabled}

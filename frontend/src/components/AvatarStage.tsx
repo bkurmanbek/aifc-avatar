@@ -17,12 +17,11 @@ interface AvatarStageProps {
   idleVideoRef: RefObject<HTMLVideoElement | null>
   introVideoRef: RefObject<HTMLVideoElement | null>
   introActive: boolean
-  introAvailable: boolean
   awaitingIntroTap: boolean
   speakCanvasRef: RefObject<HTMLCanvasElement | null>
   onToggleMic: () => void
   onToggleMute: () => void
-  onToggleIntro: () => void
+  onStartIntro: () => void
   onInterrupt: () => void
   onToggleComposer: () => void
 }
@@ -37,12 +36,11 @@ export function AvatarStage({
   idleVideoRef,
   introVideoRef,
   introActive,
-  introAvailable,
   awaitingIntroTap,
   speakCanvasRef,
   onToggleMic,
   onToggleMute,
-  onToggleIntro,
+  onStartIntro,
   onInterrupt,
   onToggleComposer,
 }: AvatarStageProps) {
@@ -52,7 +50,7 @@ export function AvatarStage({
   // frames are rendering yet. Distinct from listening/speaking. Note 'rendering' is a
   // between-chunk state DURING speech, so it must NOT count here or the badge would
   // flash mid-answer.
-  const preparing = isBusy && !isListening && !introActive && mode === 'thinking'
+  const preparing = isBusy && !isListening && !introActive && !awaitingIntroTap && mode === 'thinking'
   const toggleFullscreen = () => {
     if (document.fullscreenElement) {
       void document.exitFullscreen()
@@ -69,10 +67,10 @@ export function AvatarStage({
         <video ref={introVideoRef} id="introVid" className={introActive ? 'show' : ''} playsInline />
         <canvas ref={speakCanvasRef} id="speakCvs" width={CANVAS_W} height={CANVAS_H} />
         {awaitingIntroTap && (
-          <div className="stage-tap-start" role="status" aria-live="polite">
+          <button type="button" className="stage-tap-start" onClick={onStartIntro} aria-label="Tap to start the introduction">
             <span className="tap-start-ring" aria-hidden="true" />
             <span className="tap-start-label">Tap to start</span>
-          </div>
+          </button>
         )}
         {AVATAR_LABEL && (
           <div className="stage-overlay">
@@ -93,24 +91,6 @@ export function AvatarStage({
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
             </svg>
-          </button>
-          <button
-            className={`video-ctrl ${introActive ? 'active' : ''}`}
-            type="button"
-            onClick={onToggleIntro}
-            disabled={!introAvailable && !introActive}
-            aria-pressed={introActive}
-            aria-label={introActive ? 'Stop intro' : 'Play intro'}
-          >
-            {introActive ? (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <rect x="7" y="7" width="10" height="10" rx="2" />
-              </svg>
-            ) : (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path d="M8 5v14l11-7z" />
-              </svg>
-            )}
           </button>
           <button
             className={`video-ctrl video-ctrl-primary ${isListening ? 'listening' : ''} ${isBusy && !isListening ? 'danger' : ''}`}

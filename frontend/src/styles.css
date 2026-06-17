@@ -1431,8 +1431,15 @@ body::after {
   align-items: center;
   justify-content: center;
   gap: 16px;
-  /* Visual hint only — taps fall through to the window gesture handler that plays the intro. */
-  pointer-events: none;
+  /* Full-screen tap target: its onClick is the user gesture that starts the intro with sound. */
+  pointer-events: auto;
+  cursor: pointer;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  font: inherit;
+  border-radius: 28px;
   background: radial-gradient(ellipse at center, rgba(6,10,18,0.32), rgba(6,10,18,0.52));
   backdrop-filter: blur(2px);
   animation: msgSlide 240ms ease both;
