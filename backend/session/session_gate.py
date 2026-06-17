@@ -25,6 +25,14 @@ from ..settings import MAX_CONCURRENT_SESSIONS, SESSION_IDLE_EVICT_S
 log = logging.getLogger("backend.session_gate")
 
 
+def _ws_disconnected(session) -> bool:
+    """True if the session's websocket is no longer in the CONNECTED state."""
+    ws = getattr(session, "websocket", None)
+    state = getattr(ws, "client_state", None)
+    name = getattr(state, "name", None)
+    return name is not None and name != "CONNECTED"
+
+
 class _Entry:
     __slots__ = ("session", "last_activity")
 
@@ -44,16 +52,23 @@ class SessionGate:
         """Try to claim a slot for ``session``. Returns True if admitted."""
         async with self._lock:
             now = time.monotonic()
-            # Evict idle/abandoned holders so they don't hold the slot forever.
-            stale = [
-                e for sid, e in self._active.items()
-                if sid != session.session_id and now - e.last_activity > self._idle
-            ]
+            # Evict holders that are no longer usable so the slot frees promptly:
+            #  - dead: the websocket already disconnected (e.g. the client's watchdog
+            #    force-closed and reconnected before the old session's finally ran —
+            #    without this the reconnect would wrongly get "busy").
+            #  - idle: an abandoned-but-open tab past the idle timeout.
+            stale = []
+            for sid, e in self._active.items():
+                if sid == session.session_id:
+                    continue
+                if _ws_disconnected(e.session) or now - e.last_activity > self._idle:
+                    stale.append(e)
             for e in stale:
                 self._active.pop(e.session.session_id, None)
-                log_event(log, "session_evict_idle", session_id=e.session.session_id)
+                log_event(log, "session_evict", session_id=e.session.session_id,
+                          reason="dead" if _ws_disconnected(e.session) else "idle")
                 with contextlib.suppress(Exception):
-                    await e.session.force_disconnect("idle")
+                    await e.session.force_disconnect("evicted")
 
             existing = self._active.get(session.session_id)
             if existing is not None:

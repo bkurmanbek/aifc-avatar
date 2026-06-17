@@ -79,6 +79,12 @@ ws_log = logging.getLogger("backend.websocket")
 
 _INTERRUPT_COOLDOWN_S = 1.0
 _DUP_QUERY_WINDOW_S = 1.5
+# Max time interrupt() will block its caller (the WS receive loop / STT loop) waiting
+# for pipeline teardown. Teardown is normally sub-second; if a wedged SyncTalk call
+# makes it slower, we stop waiting and finish teardown in the background so the loop
+# keeps reading messages (answering heartbeat pings) and consuming mic audio. Without
+# this bound a slow interrupt starves pings → the client watchdog force-closes the WS.
+_INTERRUPT_TEARDOWN_TIMEOUT_S = 1.5
 
 
 def _summarize_client_payload(payload: dict) -> dict:
@@ -486,18 +492,33 @@ class ClientSession:
 
     async def interrupt(self, send_event: bool) -> None:
         self.writer.clear_active_turn()
-        if self.pipeline_task is not None and not self.pipeline_task.done():
+        task = self.pipeline_task
+        # Detach immediately so a new turn / the caller never sees a stale pipeline.
+        self.pipeline_task = None
+        if task is not None and not task.done():
             log_event(log, "pipeline_cancel_requested", session_id=self.session_id, request_id=self.active_turn_id, send_event=send_event)
-            self.pipeline_task.cancel()
-            try:
-                await self.pipeline_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                log.exception("pipeline cancellation failed")
+            task.cancel()
+            # Wait briefly for clean teardown, but NEVER block the caller (WS receive /
+            # STT loop) indefinitely — a wedged SyncTalk call would otherwise starve
+            # heartbeat pings and freeze mic capture. asyncio.wait does not re-cancel
+            # on timeout, so on timeout the task keeps unwinding in the background.
+            done, pending = await asyncio.wait({task}, timeout=_INTERRUPT_TEARDOWN_TIMEOUT_S)
+            if pending:
+                log_event(log, "pipeline_cancel_slow", session_id=self.session_id, request_id=self.active_turn_id)
+                # Drain in the background so the exception is retrieved (no warnings)
+                # and SyncTalk finishes aborting without holding up this loop.
+                asyncio.create_task(self._drain_cancelled(task))
+            else:
+                exc = task.exception() if not task.cancelled() else None
+                if exc is not None:
+                    log.error("pipeline cancellation failed", exc_info=exc)
             if send_event:
                 await self.writer.send({"type": "interrupted", "session_id": self.session_id})
-        self.pipeline_task = None
+
+    @staticmethod
+    async def _drain_cancelled(task: "asyncio.Task") -> None:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
 
     async def reset(self, *, reopen_transports: bool = True, reason: str = "reset") -> None:
         self.history.clear()
