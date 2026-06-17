@@ -41,6 +41,7 @@ from ..pipeline.answer_race import AnswerRaceResult, run_answer_race
 from ..knowledge.faq import _prebuilt_chitchat_answer
 from ..knowledge.memory import update_conversation_memory
 from ..logging_config import log_event, preview_text
+from .session_gate import GATE
 from ..pipeline.answer_format import (
     build_sentence_splitter as _build_sentence_splitter,
     coerce_spoken_chat_payload as _coerce_spoken_chat_payload,
@@ -464,6 +465,16 @@ class ClientSession:
         await self.interrupt(send_event=True)
         self._reset_interrupt_state()
 
+    async def force_disconnect(self, reason: str) -> None:
+        """Evict this session: tell the client why, then close the socket so its
+        receive loop unwinds (which releases the gate slot via the finally block)."""
+        log_event(log, "session_force_disconnect", session_id=self.session_id, reason=reason)
+        with contextlib.suppress(Exception):
+            await self.writer.send({"type": "evicted", "reason": reason,
+                                    "text": "Session ended due to inactivity."})
+        with contextlib.suppress(Exception):
+            await self.websocket.close(code=1000)
+
     async def close(self) -> None:
         await self._close_realtime_stt(reason="session_close")
         if self.pipeline_task is not None:
@@ -511,11 +522,14 @@ class ClientSession:
             return
         msg_type = payload.get("type")
         # Liveness ping from the client heartbeat — reply immediately and skip the
-        # receive log so the ~5s cadence doesn't spam the event stream.
+        # receive log so the ~5s cadence doesn't spam the event stream. Pings are
+        # deliberately NOT counted as activity by the session gate (an abandoned tab
+        # keeps pinging); only the real messages below refresh the idle timer.
         if msg_type == "ping":
             with contextlib.suppress(ClientClosedError):
                 await self.writer.send({"type": "pong", "t": payload.get("t")})
             return
+        GATE.touch(self.session_id)
         log_event(ws_log, "ws_receive", session_id=self.session_id, request_id=self.active_turn_id, **_summarize_client_payload(payload))
         if msg_type == "audio_chunk":
             chunk = await self._decode_audio_payload(payload)

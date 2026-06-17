@@ -1472,6 +1472,43 @@ body::after {
   text-shadow: 0 2px 14px rgba(0,0,0,0.6);
 }
 
+/* ── Busy overlay (single-pipeline guard) ─────────────────── */
+.busy-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(6,10,18,0.78);
+  backdrop-filter: blur(6px);
+  animation: msgSlide 200ms ease both;
+}
+.busy-card {
+  max-width: 420px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 32px 28px;
+  border-radius: 20px;
+  background: rgba(20,28,44,0.92);
+  border: 1px solid rgba(130,173,255,0.22);
+  box-shadow: 0 24px 60px rgba(0,0,0,0.5);
+}
+.busy-card h2 { margin: 0; font-size: 19px; font-weight: 800; color: #eaf1ff; }
+.busy-card p { margin: 0; font-size: 14px; line-height: 1.5; color: #aab8d4; }
+.busy-spinner {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  border: 3px solid rgba(130,173,255,0.25);
+  border-top-color: #6ea0ff;
+  animation: spin 0.9s linear infinite;
+}
+
 /* ── Preparing-answer indicator ──────────────────────────── */
 .stage-preparing {
   position: absolute;

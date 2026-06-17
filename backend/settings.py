@@ -113,6 +113,13 @@ SYNCTALK_FRAME_TIMEOUT_S = env_float("SYNCTALK_FRAME_TIMEOUT_S", 8.0)
 SYNCTALK_MAX_CONCURRENCY = env_int("SYNCTALK_MAX_CONCURRENCY", 2)
 INTRO_AUDIO_CACHE_PREBUILD = env_bool("INTRO_AUDIO_CACHE_PREBUILD", True)
 
+# Single-pipeline guard: the demo has ONE SyncTalk GPU pipeline, so concurrent
+# sessions would contend for it and reintroduce stutter. Admit at most this many
+# live WebSocket sessions; extras get a "busy" message and are closed. An idle
+# holder is evicted after SESSION_IDLE_EVICT_S so the slot never locks forever.
+MAX_CONCURRENT_SESSIONS = env_int("MAX_CONCURRENT_SESSIONS", 1)
+SESSION_IDLE_EVICT_S = env_float("SESSION_IDLE_EVICT_S", 120.0)
+
 ANSWER_RACE_TIMEOUT_MS = env_int("ANSWER_RACE_TIMEOUT_MS", 250)
 ANSWER_CACHE_TTL_S = env_float("ANSWER_CACHE_TTL_S", 1800.0)
 GEMINI_RAG_MAX_WAIT_MS = env_int("GEMINI_RAG_MAX_WAIT_MS", 12000)

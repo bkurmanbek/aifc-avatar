@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 
@@ -9,6 +10,7 @@ from ..media.tts import SonioxRealtimeTTS
 from ..media.synctalk import SyncTalkClient
 from ..logging_config import log_event
 from ..session.session import ClientSession
+from ..session.session_gate import GATE
 from .ws_writer import WsWriter
 
 log = logging.getLogger(__name__)
@@ -34,6 +36,16 @@ async def websocket_endpoint(websocket: WebSocket):
     if set_tts_session_id is not None:
         set_tts_session_id(session.session_id)
     log_event(ws_log, "websocket_connected", session_id=session.session_id)
+    # Single-pipeline guard: admit at most MAX_CONCURRENT_SESSIONS. If the slot is
+    # taken (by an active user), tell this client it's busy and close — the frontend
+    # shows a "please wait" overlay and its reconnect loop retries until a slot frees.
+    # Done BEFORE intro/prewarm so a rejected client never touches the GPU pipeline.
+    if not await GATE.acquire(session):
+        await writer.send({"type": "busy", "text": "The avatar is currently in use. Please wait a moment…"})
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1013)  # 1013 = Try Again Later
+        await session.close()
+        return
     await writer.send({"type": "session_state", "session_id": session.session_id, "state": "connected"})
     session.start_intro(intro_token or None)
     session.prewarm_realtime_stt(force=True)
@@ -58,6 +70,7 @@ async def websocket_endpoint(websocket: WebSocket):
         log.exception("ws session error")
         log_event(ws_log, "websocket_session_error", session_id=session.session_id, error=exc, level=logging.ERROR)
     finally:
+        await GATE.release(session.session_id)
         try:
             await session.reset(reopen_transports=False, reason="disconnect")
         except Exception:

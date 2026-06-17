@@ -21,6 +21,8 @@ export type WsInbound =
   | { type: 'status'; text: string; turn_id?: string }
   | { type: 'interrupted'; session_id?: string }
   | { type: 'stop_confirmed' }
+  | { type: 'busy'; text?: string }
+  | { type: 'evicted'; reason?: string; text?: string }
   | { type: 'error'; text: string; turn_id?: string }
 
 export type ChatRole = 'user' | 'avatar'

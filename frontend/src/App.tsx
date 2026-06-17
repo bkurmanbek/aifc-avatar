@@ -47,6 +47,9 @@ export default function App() {
   const [sttReady, setSttReady] = useState(false)
   const [awaitingIntroTap, setAwaitingIntroTap] = useState(false)
   const [lastLatencyMs, setLastLatencyMs] = useState<number | null>(null)
+  // Single-pipeline guard: backend admits one session at a time. When busy, show a
+  // "please wait" overlay; the WS reconnect loop keeps retrying until a slot frees.
+  const [busyWaiting, setBusyWaiting] = useState(false)
 
   // ── Refs ──────────────────────────────────────────────────────
   const idleVidRef = useRef<HTMLVideoElement | null>(null)
@@ -264,6 +267,17 @@ export default function App() {
       switch (msg.type) {
         case 'session_state':
           currentSessionIdRef.current = msg.session_id
+          setBusyWaiting(false)   // we got a slot
+          break
+        case 'busy':
+          // Another visitor holds the single pipeline slot. Show the wait overlay;
+          // the server closes the socket and useWebSocket's reconnect loop retries.
+          setBusyWaiting(true)
+          break
+        case 'evicted':
+          // We were dropped (e.g. idle). The reconnect loop will try to rejoin and
+          // will land on 'busy' or 'session_state' depending on availability.
+          log(msg.text || 'session ended', 'err')
           break
         case 'partial':
           setPartialText(msg.text)
@@ -1035,6 +1049,15 @@ export default function App() {
   // ── Render ─────────────────────────────────────────────────────
   return (
     <div className={`app ${showComposer ? 'composer-open' : ''}`}>
+      {busyWaiting && (
+        <div className="busy-overlay" role="status" aria-live="polite">
+          <div className="busy-card">
+            <span className="busy-spinner" aria-hidden="true" />
+            <h2>The avatar is currently in use</h2>
+            <p>Someone else is talking with the demo right now. You'll connect automatically as soon as it's free.</p>
+          </div>
+        </div>
+      )}
       <header className="app-header">
         <div className="brand-group">
           <h1 className="brand-title">AIFC</h1>
