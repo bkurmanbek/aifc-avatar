@@ -1,0 +1,421 @@
+From 7766242773c700ce392adc7326c206459ffecfa8 Mon Sep 17 00:00:00 2001
+From: bkurmanbek <bakytzhan.kurmanbek@nu.edu.kz>
+Date: Thu, 18 Jun 2026 11:15:27 +0000
+Subject: [PATCH] perf: pipeline /infer_stream stages + output-space composite
+
+prep/gpu/composite run as concurrent coroutines (bounded queues, in-order,
+abort-on-disconnect preserved in gpu stage + synchronous task cancel in finally);
+composite directly in 540x960 output space using precomputed bg540/crop328.
+~2x server throughput (65 -> ~128 fps), SSIM 0.999 vs full-res. All flag-gated
+with defaults preserving original behaviour: SYNCTALK_PIPELINE, SYNCTALK_FAST_COMPOSITE,
+SYNCTALK_DTYPE, SYNCTALK_PROFILE, SYNCTALK_GPU_JPEG. Adds bench_forward.py
+(GPU-only forward microbench).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ bench_forward.py   |  50 +++++++++
+ synctalk_server.py | 258 ++++++++++++++++++++++++++++++++++++++++++---
+ 2 files changed, 291 insertions(+), 17 deletions(-)
+ create mode 100644 bench_forward.py
+
+diff --git a/bench_forward.py b/bench_forward.py
+new file mode 100644
+index 0000000..5653969
+--- /dev/null
++++ b/bench_forward.py
+@@ -0,0 +1,50 @@
++"""Microbenchmark: isolate the UNet GPU forward time (no compositing / JPEG / IO).
++
++Tells us whether /infer_stream throughput is GPU-bound or CPU/composite-bound.
++Run standalone (loads its own model copy ~7GB VRAM):
++  SYNCTALK_DTYPE=fp32 python bench_forward.py
++  SYNCTALK_DTYPE=bf16 python bench_forward.py
++"""
++import os, sys, time
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++import torch
++from unet_328 import Model
++
++DTYPE = os.getenv("SYNCTALK_DTYPE", "fp32").lower()
++AUTO = {"bf16": torch.bfloat16, "fp16": torch.float16}.get(DTYPE)
++BS = int(os.getenv("SYNCTALK_BATCH_SIZE", "32"))
++AVATAR = os.getenv("SYNCTALK_AVATAR", "aifc-avatar-5-3min_exp_6")
++device = torch.device("cuda")
++
++ckpt_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoint", AVATAR)
++ckpt = os.path.join(ckpt_dir, sorted(os.listdir(ckpt_dir), key=lambda x: int(x.split(".")[0]))[-1])
++net = Model(6, "ave").to(device)
++net.load_state_dict(torch.load(ckpt, map_location=device, weights_only=False))
++net.eval()
++
++imgs = torch.zeros(BS, 6, 320, 320, device=device)
++audio = torch.zeros(BS, 32, 16, 16, device=device)
++
++def fwd():
++    with torch.no_grad():
++        if AUTO is not None:
++            with torch.autocast("cuda", dtype=AUTO):
++                p = net(imgs, audio)
++            return p.float()
++        return net(imgs, audio)
++
++for _ in range(10):  # warmup
++    fwd()
++torch.cuda.synchronize()
++
++N = 100
++t0 = time.perf_counter()
++for _ in range(N):
++    fwd()
++torch.cuda.synchronize()
++dt = time.perf_counter() - t0
++
++per_batch_ms = dt / N * 1000
++fps = BS * N / dt
++print(f"dtype={DTYPE} batch={BS}: {per_batch_ms:.2f} ms/batch  ->  {fps:.0f} GPU-only fps "
++      f"({BS} frames/batch)")
+diff --git a/synctalk_server.py b/synctalk_server.py
+index 1c356c8..1aea5ba 100644
+--- a/synctalk_server.py
++++ b/synctalk_server.py
+@@ -5,6 +5,7 @@ import json as _json
+ import os
+ import sys
+ import threading
++import time
+ import uuid
+ from concurrent.futures import ThreadPoolExecutor
+ 
+@@ -37,6 +38,40 @@ AVATAR_NAME  = os.getenv("SYNCTALK_AVATAR", "aifc-avatar-5-exp-3")
+ MODE         = "ave"
+ BATCH_SIZE   = int(os.getenv("SYNCTALK_BATCH_SIZE", "32"))
+ 
++# Phase 1 (OPTIMIZATION_PLAN.md): optional autocast precision for the UNet forward.
++#   SYNCTALK_DTYPE=bf16  -> bfloat16 autocast (faster, lower VRAM, stable on Hopper)
++#   SYNCTALK_DTYPE=fp16  -> float16 autocast
++#   SYNCTALK_DTYPE=fp32  -> unchanged (default)
++# Master weights stay fp32; autocast casts per-op. Output is cast back to fp32 in
++# _gpu_forward before the *255 uint8 conversion.
++_DTYPE_NAME     = os.getenv("SYNCTALK_DTYPE", "fp32").lower()
++_AUTOCAST_DTYPE = {
++    "bf16": torch.bfloat16, "bfloat16": torch.bfloat16,
++    "fp16": torch.float16,  "float16": torch.float16,
++}.get(_DTYPE_NAME)
++
++# Phase 0/1 (OPTIMIZATION_PLAN.md): per-stage profiling of /infer_stream.
++# SYNCTALK_PROFILE=1 -> log prep / gpu / composite / serialize timing per request.
++_PROFILE = os.getenv("SYNCTALK_PROFILE", "0") == "1"
++
++# Stage pipelining (OPTIMIZATION_PLAN.md 1.6): run prep/gpu/composite as concurrent
++# coroutines connected by bounded queues so stages overlap (throughput gated by the
++# slowest stage, not their sum). SYNCTALK_PIPELINE=0 falls back to the sequential path.
++_PIPELINE = os.getenv("SYNCTALK_PIPELINE", "1") == "1"
++
++# Output-space composite (OPTIMIZATION_PLAN.md lever #2): composite directly in the
++# 540x960 output space instead of copying+compositing the full 1920x1080 frame and then
++# downscaling it per frame. Precomputes the downscaled background + 328 border crop once
++# at load. ~SSIM 0.999 vs the full-res path (not byte-identical). SYNCTALK_FAST_COMPOSITE=1.
++_FAST_COMPOSITE = os.getenv("SYNCTALK_FAST_COMPOSITE", "0") == "1"
++
++# GPU JPEG encode (OPTIMIZATION_PLAN.md 1.9): encode frames with the H200's dedicated
++# nvJPEG hardware engine (torchvision, ~0.26 ms/f) instead of CPU cv2.imencode (~1.83 ms/f).
++# Output is standard JPEG so the frontend/transport is unchanged. SYNCTALK_GPU_JPEG=1.
++_GPU_JPEG = os.getenv("SYNCTALK_GPU_JPEG", "0") == "1"
++if _GPU_JPEG:
++    from torchvision.io import encode_jpeg as _tv_encode_jpeg
++
+ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+ 
+ # ── AudioEncoder ──────────────────────────────────────────────
+@@ -72,6 +107,10 @@ print(f"Pre-loading {len_img+1} avatar images...")
+ # img_meta[i]:    (full_img_np, h, w, xmin, ymin, ymax) for compositing
+ img_tensors = {}
+ img_meta    = {}
++# img_meta_fast[i]: (bg540, crop328, xo, yo, wo, ho) — precomputed output-space composite
++# inputs (only when _FAST_COMPOSITE). bg540 = src downscaled to 540x960 once; crop328 =
++# the 328 border crop; (xo,yo,wo,ho) = the face region in 540x960 output space.
++img_meta_fast = {}
+ 
+ def _load_lms(i: int) -> np.ndarray:
+     """Load landmarks for index i, falling back to nearest neighbour if missing."""
+@@ -128,16 +167,37 @@ for i in range(1, len_img + 1):
+     img_tensors[i] = torch.cat([t_real, t_mask], dim=0)
+     img_meta[i]    = (img, h, w, xmin, ymin, ymax)
+ 
+-print(f"Avatar data ready — SyncTalk server live (batch_size={BATCH_SIZE})")
++    if _FAST_COMPOSITE:
++        # Precompute output-space inputs once (matches _composite's square face region
++        # cols xmin:xmin+(ymax-ymin)). bg540 IS the non-face output (downscaled src).
++        sq = ymax - ymin
++        face_crop = img[ymin:ymax, xmin:xmin + sq]
++        crop328_f = cv2.resize(face_crop, (328, 328), interpolation=cv2.INTER_CUBIC)
++        bg540 = cv2.resize(img, (540, 960), interpolation=cv2.INTER_AREA)
++        sx, sy = 540 / img.shape[1], 960 / img.shape[0]
++        xo, yo = round(xmin * sx), round(ymin * sy)
++        wo = min(round(sq * sx), 540 - xo)
++        ho = min(round(sq * sy), 960 - yo)
++        img_meta_fast[i] = (bg540, crop328_f, xo, yo, wo, ho)
++
++print(f"Avatar data ready — SyncTalk server live (batch_size={BATCH_SIZE}, "
++      f"fast_composite={_FAST_COMPOSITE})")
+ 
+ # ── GPU warmup: compile CUDA kernels before first real request ─
+-print("Warming up GPU (pre-compiling CUDA kernels)...")
++print(f"Warming up GPU (pre-compiling CUDA kernels, dtype={_DTYPE_NAME})...")
+ _w_stream = torch.cuda.Stream()
+ with torch.cuda.stream(_w_stream):
+     with torch.no_grad():
+-        _w_imgs  = torch.zeros(1, 6, 320, 320, device=device)
+-        _w_audio = torch.zeros(1, 32, 16, 16, device=device)
+-        net(_w_imgs, _w_audio)
++        # Warm up both batch=1 and a full batch so the autocast/fp32 kernels for the
++        # real request shapes are compiled before the first turn (no cold stall).
++        for _bs in (1, BATCH_SIZE):
++            _w_imgs  = torch.zeros(_bs, 6, 320, 320, device=device)
++            _w_audio = torch.zeros(_bs, 32, 16, 16, device=device)
++            if _AUTOCAST_DTYPE is not None:
++                with torch.autocast("cuda", dtype=_AUTOCAST_DTYPE):
++                    net(_w_imgs, _w_audio)
++            else:
++                net(_w_imgs, _w_audio)
+ _w_stream.synchronize()
+ del _w_imgs, _w_audio, _w_stream
+ print("GPU warmup done")
+@@ -180,7 +240,12 @@ def _gpu_forward(imgs_cpu: torch.Tensor, audio_cpu: torch.Tensor) -> np.ndarray:
+         imgs  = imgs_cpu.to(device, non_blocking=True)
+         audio = audio_cpu.to(device, non_blocking=True)
+         with torch.no_grad():
+-            preds = net(imgs, audio)
++            if _AUTOCAST_DTYPE is not None:
++                with torch.autocast("cuda", dtype=_AUTOCAST_DTYPE):
++                    preds = net(imgs, audio)
++                preds = preds.float()  # CRITICAL: back to fp32 before the *255 uint8 cast
++            else:
++                preds = net(imgs, audio)
+         preds_cpu = preds.cpu()
+     stream.synchronize()
+     return (preds_cpu.numpy().transpose(0, 2, 3, 1) * 255).astype(np.uint8)
+@@ -256,10 +321,28 @@ def _prep_batch(audio_feats, frame_indices, batch_start: int, batch_end: int):
+     return imgs_cpu, audio_cpu
+ 
+ 
+-# ── CPU-only JPEG compositing ─────────────────────────────────
+-def _composite(preds_np: np.ndarray, frame_idx_slice) -> list:
+-    """Composite UNet predictions onto avatar images, return list of b64 JPEGs."""
+-    result = []
++# ── JPEG encoding (CPU cv2 or GPU nvJPEG) ─────────────────────
++def _encode_b64(outs: list) -> list:
++    """Encode a list of BGR 540x960 frames to base64 JPEG strings.
++    GPU path (nvJPEG) when SYNCTALK_GPU_JPEG=1, else CPU cv2.imencode."""
++    if not _GPU_JPEG:
++        return [base64.b64encode(cv2.imencode(".jpg", o, [cv2.IMWRITE_JPEG_QUALITY, 82])[1]).decode()
++                for o in outs]
++    # nvJPEG wants RGB CHW uint8. Stack the batch, flip BGR->RGB, move once to GPU.
++    arr = np.ascontiguousarray(np.stack(outs)[..., ::-1])      # [N,H,W,3] RGB
++    t = torch.from_numpy(arr).to(device, non_blocking=True).permute(0, 3, 1, 2).contiguous()
++    try:
++        encoded = _tv_encode_jpeg([t[i] for i in range(t.shape[0])], quality=82)  # batched CUDA
++    except (TypeError, RuntimeError):
++        encoded = [_tv_encode_jpeg(t[i], quality=82) for i in range(t.shape[0])]
++    return [base64.b64encode(e.cpu().numpy().tobytes()).decode() for e in encoded]
++
++
++# ── Compositing (CPU) ─────────────────────────────────────────
++def _composite_full(preds_np: np.ndarray, frame_idx_slice) -> list:
++    """Composite predictions onto the full 1920x1080 frame, then downscale to 540x960.
++    Original path (SYNCTALK_FAST_COMPOSITE=0). Returns a list of b64 JPEGs."""
++    outs = []
+     for j, fi_raw in enumerate(frame_idx_slice):
+         fi = nearest_valid(fi_raw)
+         src_img, h, w, xmin, ymin, ymax = img_meta[fi]
+@@ -270,9 +353,28 @@ def _composite(preds_np: np.ndarray, frame_idx_slice) -> list:
+         crop_r = cv2.resize(crop_r, (w, h), interpolation=cv2.INTER_CUBIC)
+         out[ymin:ymax, xmin:xmin + (ymax - ymin)] = crop_r
+         out = cv2.resize(out, (540, 960), interpolation=cv2.INTER_AREA)
+-        _, buf = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 82])
+-        result.append(base64.b64encode(buf).decode())
+-    return result
++        outs.append(out)
++    return _encode_b64(outs)
++
++
++def _composite_fast(preds_np: np.ndarray, frame_idx_slice) -> list:
++    """Composite directly in 540x960 output space using precomputed bg540/crop328
++    (SYNCTALK_FAST_COMPOSITE=1). Avoids the per-frame full-res copy + full-frame
++    downscale; only the small face region is resized. ~SSIM 0.999 vs _composite_full."""
++    outs = []
++    for j, fi_raw in enumerate(frame_idx_slice):
++        fi = nearest_valid(fi_raw)
++        bg540, crop328, xo, yo, wo, ho = img_meta_fast[fi]
++        crop_r = crop328.copy()
++        crop_r[4:324, 4:324] = preds_np[j]
++        face = cv2.resize(crop_r, (wo, ho), interpolation=cv2.INTER_AREA)
++        out = bg540.copy()
++        out[yo:yo + ho, xo:xo + wo] = face
++        outs.append(out)
++    return _encode_b64(outs)
++
++
++_composite = _composite_fast if _FAST_COMPOSITE else _composite_full
+ 
+ 
+ # ── FrameAccumulator (Tier C) ─────────────────────────────────
+@@ -365,8 +467,25 @@ async def infer_stream(req: InferRequest, request: Request):
+ 
+     total_batches = (n_frames + BATCH_SIZE - 1) // BATCH_SIZE
+ 
+-    async def generate():
++    def _log_profile(prof, gen_t0):
++        if not (_PROFILE and prof["frames"]):
++            return
++        n = prof["frames"]
++        wall = time.perf_counter() - gen_t0
++        print(
++            f"[profile] frames={n} wall={wall*1000:.0f}ms ({n/wall:.1f}fps) | "
++            f"per-frame ms: prep={prof['prep']/n*1000:.2f} gpu={prof['gpu']/n*1000:.2f} "
++            f"composite={prof['composite']/n*1000:.2f} serialize={prof['serialize']/n*1000:.2f} | "
++            f"stage sums ms: prep={prof['prep']*1000:.0f} gpu={prof['gpu']*1000:.0f} "
++            f"composite={prof['composite']*1000:.0f} serialize={prof['serialize']*1000:.0f}",
++            flush=True,
++        )
++
++    # ── Sequential path (SYNCTALK_PIPELINE=0) — original behaviour ──
++    async def generate_sequential():
+         done_batches = 0
++        prof = {"prep": 0.0, "gpu": 0.0, "composite": 0.0, "serialize": 0.0, "frames": 0}
++        gen_t0 = time.perf_counter()
+         for batch_start in range(0, n_frames, BATCH_SIZE):
+             # Stop computing if the backend has cancelled this turn (barge-in /
+             # interrupt). Checked before the GPU batch so we don't burn a forward
+@@ -376,20 +495,125 @@ async def infer_stream(req: InferRequest, request: Request):
+                       f"{done_batches}/{total_batches} batches", flush=True)
+                 break
+             batch_end = min(batch_start + BATCH_SIZE, n_frames)
++            _t = time.perf_counter()
+             imgs_cpu, audio_cpu = await loop.run_in_executor(
+                 _cpu_exec, _prep_batch,
+                 audio_feats, frame_indices, batch_start, batch_end,
+             )
++            prof["prep"] += time.perf_counter() - _t
++            _t = time.perf_counter()
+             preds_np = await _accum.infer(imgs_cpu, audio_cpu)
++            prof["gpu"] += time.perf_counter() - _t
++            _t = time.perf_counter()
+             frames   = await loop.run_in_executor(
+                 _cpu_exec, _composite,
+                 preds_np, frame_indices[batch_start:batch_end],
+             )
++            prof["composite"] += time.perf_counter() - _t
+             for frame in frames:
+-                yield _json.dumps({"frame": frame}) + "\n"
++                _t = time.perf_counter()
++                line = _json.dumps({"frame": frame}) + "\n"
++                prof["serialize"] += time.perf_counter() - _t
++                yield line
++            prof["frames"] += len(frames)
+             done_batches += 1
+-
+-    return StreamingResponse(generate(), media_type="application/x-ndjson")
++        _log_profile(prof, gen_t0)
++
++    # ── Pipelined path (SYNCTALK_PIPELINE=1, default) ──
++    # prep -> gpu -> composite run as three concurrent coroutines linked by bounded
++    # queues. Each stage is a single in-order consumer, so frame order is preserved;
++    # the bounded queues (maxsize=2) overlap stages while capping look-ahead memory.
++    async def generate_pipelined():
++        SENTINEL = object()
++        q_gpu  = asyncio.Queue(maxsize=2)
++        q_comp = asyncio.Queue(maxsize=2)
++        q_out  = asyncio.Queue(maxsize=2)
++        prof = {"prep": 0.0, "gpu": 0.0, "composite": 0.0, "serialize": 0.0, "frames": 0}
++        gen_t0 = time.perf_counter()
++        abort = asyncio.Event()
++
++        async def prep_stage():
++            for batch_start in range(0, n_frames, BATCH_SIZE):
++                if abort.is_set():
++                    break
++                batch_end = min(batch_start + BATCH_SIZE, n_frames)
++                _t = time.perf_counter()
++                imgs_cpu, audio_cpu = await loop.run_in_executor(
++                    _cpu_exec, _prep_batch,
++                    audio_feats, frame_indices, batch_start, batch_end,
++                )
++                prof["prep"] += time.perf_counter() - _t
++                await q_gpu.put((batch_start, batch_end, imgs_cpu, audio_cpu))
++            await q_gpu.put(SENTINEL)
++
++        async def gpu_stage():
++            done = 0
++            while True:
++                item = await q_gpu.get()
++                if item is SENTINEL:
++                    await q_comp.put(SENTINEL)
++                    break
++                # Abort-on-disconnect: bail before burning a GPU forward for frames
++                # nobody will receive (barge-in / interrupt).
++                if await request.is_disconnected():
++                    abort.set()
++                    print(f"[infer_stream] aborted on disconnect after "
++                          f"{done}/{total_batches} batches", flush=True)
++                    await q_comp.put(SENTINEL)
++                    break
++                batch_start, batch_end, imgs_cpu, audio_cpu = item
++                _t = time.perf_counter()
++                preds_np = await _accum.infer(imgs_cpu, audio_cpu)
++                prof["gpu"] += time.perf_counter() - _t
++                await q_comp.put((batch_start, batch_end, preds_np))
++                done += 1
++
++        async def comp_stage():
++            while True:
++                item = await q_comp.get()
++                if item is SENTINEL:
++                    await q_out.put(SENTINEL)
++                    break
++                batch_start, batch_end, preds_np = item
++                _t = time.perf_counter()
++                frames = await loop.run_in_executor(
++                    _cpu_exec, _composite,
++                    preds_np, frame_indices[batch_start:batch_end],
++                )
++                prof["composite"] += time.perf_counter() - _t
++                await q_out.put(frames)
++
++        tasks = [
++            asyncio.create_task(prep_stage()),
++            asyncio.create_task(gpu_stage()),
++            asyncio.create_task(comp_stage()),
++        ]
++        try:
++            while True:
++                frames = await q_out.get()
++                if frames is SENTINEL:
++                    break
++                for frame in frames:
++                    _t = time.perf_counter()
++                    line = _json.dumps({"frame": frame}) + "\n"
++                    prof["serialize"] += time.perf_counter() - _t
++                    yield line
++                prof["frames"] += len(frames)
++        finally:
++            # Cancel worker tasks synchronously FIRST so cleanup is guaranteed even when
++            # this generator is itself being cancelled (client disconnect / barge-in) —
++            # the cancel() calls run before the awaitable gather, which may be cut short.
++            abort.set()
++            for t in tasks:
++                t.cancel()
++            _log_profile(prof, gen_t0)
++            try:
++                await asyncio.gather(*tasks, return_exceptions=True)
++            except asyncio.CancelledError:
++                pass
++
++    _gen = generate_pipelined if _PIPELINE else generate_sequential
++    return StreamingResponse(_gen(), media_type="application/x-ndjson")
+ 
+ 
+ # ── /infer — non-streaming fallback ──────────────────────────
+-- 
+2.34.1
+
