@@ -61,6 +61,7 @@ Key settings to know:
 - `MAX_TTS_CHARS=220` — do NOT lower this; it caps TTS sentences, not the full answer
 - `_AVATAR_WORKER_COUNT = 2` in `response_stream.py` — two parallel SyncTalk workers
 - `AVATAR_TTS_FIRST_SEGMENT_MS` / `AVATAR_TTS_SEGMENT_MS` — PCM sub-segment sizes fed to SyncTalk as TTS streams (default 1000 / 1500). Do NOT shrink the first segment to a few-hundred ms — a tiny first chunk renders choppily and forces an instant transition. See "Streaming media pipeline" below.
+- `SYNCTALK_PIPELINE=1` / `SYNCTALK_FAST_COMPOSITE=1` — SyncTalk render throughput optimizations (default on; see "SyncTalk throughput optimization" below). Other flags `SYNCTALK_DTYPE` / `SYNCTALK_PROFILE` / `SYNCTALK_GPU_JPEG` exist but default off (measured no-ops/net-losses — do NOT enable without re-benchmarking).
 
 ---
 
@@ -160,6 +161,14 @@ Frontend on **Vercel** (`frontend-five-lemon-98.vercel.app`), backend stays on t
 
 **Transport history (do NOT regress):** originally ngrok-free, but it couldn't sustain the ~10 Mbps binary avatar-frame stream (~50 KB JPEG × 25 fps) — frames backed up in the tunnel and playback stuttered (client render lag grew to ~5s; `client_first_render` − `first_frame` in the `pipeline_done` metrics is the tell). The box uplink is ~88 Mbps, so the box was never the bottleneck. Cloudflare Tunnel (no throttle, Almaty PoP) dropped the lag to ~2.2s (the designed `LIVE_PREBUFFER_S`) at full frame quality. ngrok is retired/disabled. If frames stutter again over the network, check the tunnel/bandwidth FIRST — the LAN-tuned client buffer can't paper over a transport throughput deficit.
 
+### SyncTalk throughput optimization (stage pipelining + fast composite)
+Lives in the **separate SyncTalk repo** `synctalk_server.py` (`/infer_stream`); needs a SyncTalk restart to take effect. Flag-gated via `config.env`, default on. Took SyncTalk render throughput **~65 → ~128 fps (≈2×), ~2 → ~5 concurrent avatars per H200**, quality SSIM 0.999 (visually identical). Full write-up + measured dead-ends in `OPTIMIZATION_PLAN.md`.
+- **`SYNCTALK_PIPELINE=1`** — `/infer_stream` runs prep/gpu/composite as three concurrent coroutines linked by bounded queues (each a single in-order consumer → frame order preserved). Throughput becomes gated by the slowest stage (composite), not their sum. Abort-on-disconnect is preserved (gpu stage polls `is_disconnected`; `finally` cancels workers synchronously). `=0` → original sequential path.
+- **`SYNCTALK_FAST_COMPOSITE=1`** — composite directly in 540×960 output space (precomputed downscaled bg + 328 border crop per frame) instead of copying+compositing the full 1920×1080 frame then downscaling. SSIM 0.999 vs full-res (NOT byte-identical). `=0` → byte-perfect full-res.
+- **Bench harness:** `python scripts/bench_synctalk.py --tag X --compare-golden` measures fps + SSIM/PSNR vs golden frames (`var/bench/`). Use it before/after any SyncTalk render change — quality gate SSIM≥0.98.
+- **Measured dead-ends (do NOT retry without re-benchmarking):** BF16/TensorRT (GPU forward already 15× faster than the pipeline), NVENC H.264 (no encoder on H200), software libx264 (~15 ms/f, and JPEG bandwidth fits the uplink at 5 streams), GPU nvJPEG (net loss in-pipeline). The remaining bottleneck is CPU JPEG `imencode` (~1.83 ms/f); beyond ~5 avatars, scale via more GPUs + a router.
+- **`_AVATAR_WORKER_COUNT = 2`** (`response_stream.py`) pipelines *across* chunks; the above pipelines *within* one `/infer_stream` call. Independent.
+
 ### SyncTalk checkpoint
 Current: `aifc-avatar-5-3min_exp_6` — 5747 frames (229s head cycle), better visual quality than the previous 27s cycle checkpoint. Located at `/home/admin-aifc/SyncTalk_2D/checkpoint/aifc-avatar-5-3min_exp_6/`.
 
@@ -175,7 +184,9 @@ python scripts/smoke_ws_text.py
 python scripts/smoke_ws_interrupt.py
 python scripts/capture_ws_tts.py --text "Hello" --out rec_1.wav
 python scripts/capture_ws_mp4.py --query "What is AIFC?" --output /tmp/turn.mp4
+python scripts/bench_synctalk.py --tag X --compare-golden   # SyncTalk fps + SSIM vs golden
 ```
+Note: `smoke_ws_interrupt.py` sends a client `{type:'interrupt'}` and waits for `interrupted`, but the manual-interrupt path cancels silently (`session.py` → `interrupt(send_event=False)`); only barge-in emits `interrupted`. So that script hangs by design — not a regression.
 
 ---
 
@@ -203,3 +214,5 @@ cache/                — semantic answer cache
 - Do not make `interrupt()` `await` full pipeline teardown inline — it blocks the WS/STT loops, starves heartbeat pings (→ WS disconnect) and freezes mic capture. Keep the bounded `asyncio.wait` + background drain
 - Keep loading the intro MP4 via the header-bearing blob fetch (`loadIntroBlob`), not a bare `<video src>` — portable across transports (see intro section)
 - Do not start the intro from the WS `intro_video` handler — autoplay-with-sound needs a user gesture; start it from the "Tap to start" button's onClick
+- Do not change the SyncTalk render path (pipelining / composite / encode in `synctalk_server.py`) without re-running `scripts/bench_synctalk.py --compare-golden` — quality gate SSIM≥0.98, and several "obvious" speedups (BF16, NVENC, GPU nvJPEG) measured as no-ops/net-losses (see `OPTIMIZATION_PLAN.md`)
+- Do not `git push` the SyncTalk repo to `origin` — its `origin` is the **upstream** `ZiqiaoPeng/SyncTalk_2D` (no write access). SyncTalk commits are local; push only to your own fork remote if you add one

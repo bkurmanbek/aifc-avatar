@@ -3,14 +3,55 @@
 _Session date: 2026-06-16. Read this first, then `CLAUDE.md`. This documents an end-to-end
 effort to kill avatar stuttering and chunk-transition gaps across the intro and answer paths._
 
-> **Update 2026-06-17 (latest) — interrupt/barge-in robustness + `CODE_REVIEW.md` verdict. See the FIRST section below.**
+> **Update 2026-06-18 (latest) — SyncTalk render throughput optimization (~2→5 avatars/GPU). See the FIRST section below.**
+> **Update 2026-06-17 — interrupt/barge-in robustness + `CODE_REVIEW.md` verdict.**
 > **Update 2026-06-17 (later) — public deploy + intro playback fix.**
 > **Update 2026-06-17 — resilience + control panel.**
 > The stutter work (Phases 1–5) is unchanged and still current.
 
 ---
 
-## Session 2026-06-17 (latest) — barge-in/interrupt hardening + code-review triage
+## Session 2026-06-18 (latest) — SyncTalk render throughput optimization
+
+Goal: raise concurrent-session capacity per GPU without losing quality. Full write-up,
+per-phase results, and measured dead-ends are in **`OPTIMIZATION_PLAN.md`** (§0–1.10).
+
+### What shipped (live; flag-gated, default on via `config.env`; abort/leak validated)
+- **Stage pipelining** (`SYNCTALK_PIPELINE=1`, SyncTalk repo `synctalk_server.py`): `/infer_stream`
+  runs prep/gpu/composite as three concurrent coroutines linked by bounded queues — each a
+  single in-order consumer (frame order preserved); throughput gated by the slowest stage, not
+  the sum. **~2 → ~4 avatars/GPU, byte-identical (SSIM 1.0).** Abort-on-disconnect preserved.
+- **Output-space composite** (`SYNCTALK_FAST_COMPOSITE=1`): composite in 540×960 space (precomputed
+  downscaled bg + 328 border crop) instead of full-res copy+downscale. **~4 → ~5 avatars/GPU,
+  SSIM 0.999** (visually identical; verified by side-by-side worst-case frames — diff confined to
+  the mouth interior). User-approved as the production default.
+- **Net: 65.6 → ~128 fps (≈2×), ~2 → ~5 concurrent avatars per H200**, quality SSIM 0.999.
+
+### Tooling added
+- `scripts/bench_synctalk.py` — SyncTalk fps + first-frame + VRAM + golden-frame SSIM/PSNR harness
+  (`--compare-golden`, gate SSIM≥0.98). `SyncTalk_2D/bench_forward.py` — GPU-only forward microbench.
+- `synctalk_server.py` flags: `SYNCTALK_PIPELINE`, `SYNCTALK_FAST_COMPOSITE`, plus `SYNCTALK_DTYPE`
+  / `SYNCTALK_PROFILE` / `SYNCTALK_GPU_JPEG` (default off; see below).
+
+### Measured DEAD-ENDS (don't retry without re-benchmarking)
+- **BF16 / TensorRT:** no-op — GPU forward is already ~988 fps (15× faster than the ~66 fps pipeline);
+  the bottleneck is CPU composite + serialization, not GPU compute.
+- **NVENC H.264:** infeasible — the **H200 has no NVENC encoder block** (`avcodec_open2` fails).
+- **Software libx264:** ~15 ms/frame (8× JPEG) → would tank fps; and bandwidth isn't actually binding
+  (5 JPEG streams = 64 Mbps < ~88 Mbps uplink), so H.264 buys nothing here.
+- **GPU nvJPEG:** 7× faster in isolation but **net loss in-pipeline** (CPU→GPU round-trip + ~36
+  device→host syncs/batch + serialises vs the forward). Only pays off with GPU compositing.
+- Remaining bottleneck = CPU JPEG `imencode` (~1.83 ms/f). Beyond ~5 avatars → more GPUs + a router.
+
+### Commits (local; NOT pushed)
+- avatar-system-2 (`origin = bkurmanbek/aifc-avatar`): `67c0ee4` (optimization) + `8542c0e`
+  (`CODE_REVIEW.md` = Soniox voice-bot demo ideas). Push: `! git push origin main`.
+- **SyncTalk_2D**: `7766242` — **but `origin` is the upstream `ZiqiaoPeng/SyncTalk_2D` (no write
+  access)**. Commit is local-only; add your own fork remote before pushing.
+
+---
+
+## Session 2026-06-17 — barge-in/interrupt hardening + code-review triage
 
 This block covers: the single-session gate, the interrupt non-blocking fix, the SyncTalk
 abort-on-disconnect, the barge-in/VAD tuning, and a **triage of `CODE_REVIEW.md`** (a
