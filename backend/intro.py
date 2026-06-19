@@ -483,8 +483,11 @@ def encode_frames_to_mp4(frames: list[str], wav_bytes: bytes, out_path: Path, fp
         _ffmpeg_bin(), "-y",
         "-f", "image2pipe", "-framerate", str(fps), "-i", "pipe:0",
         "-i", str(tmp_audio),
-        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "128k",
+        # High quality (CRF 16, slow preset): these are prebuilt offline, so we spend the
+        # bits/time for near-transparent video that matches the live q95 JPEG stream. The
+        # default CRF (23) was ~570 kbps and looked visibly softer than live answers.
+        "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "160k",
         "-shortest", "-movflags", "+faststart",
         "-f", "mp4",  # tmp_out ends in .mp4.tmp; ffmpeg can't infer the muxer from that
         str(tmp_out),
