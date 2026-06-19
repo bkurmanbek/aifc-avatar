@@ -77,16 +77,13 @@ export default function App() {
   const userInteractedRef = useRef(false)
   const pendingIntroUrlRef = useRef<string | null>(null)
   const awaitingIntroTapRef = useRef(false)
-  // The intro MP4 lives on the ngrok-tunneled backend, which serves a browser-warning
-  // interstitial (text/html) to plain <video> requests — a <video src> can't send the
-  // skip header, so it fails with MEDIA_ERR_SRC_NOT_SUPPORTED. We instead fetch the MP4
-  // via fetch() WITH the skip header and play it from a blob object URL.
-  const introObjUrlRef = useRef<string | null>(null)
-  const introBlobPromiseRef = useRef<Promise<string | null> | null>(null)
+  // The intro/FAQ MP4s are streamed progressively: the <video src> points directly at the
+  // backend URL (Cloudflare Tunnel, no interstitial) and the browser fetches via HTTP range
+  // requests, starting playback after the first segment buffers instead of downloading the
+  // whole file. (The old blob-fetch was only needed for the retired ngrok interstitial.)
   // Prebuilt FAQ answer clip (reuses the intro <video> element). faqVideoActiveRef lets the
   // 'done' handler skip the canvas onAllDone->idle while the clip owns the speaking state.
   const faqVideoActiveRef = useRef(false)
-  const faqObjUrlRef = useRef<string | null>(null)
   const idleTimerRef = useRef<{ reset: () => void; clear: () => void }>({ reset: () => {}, clear: () => {} })
 
   useEffect(() => {
@@ -141,9 +138,9 @@ export default function App() {
   }, [])
 
   // Stop and hide the shared intro/FAQ <video> (used on barge-in, interrupt, error, or new
-  // turn). Also tears down any in-flight FAQ clip state + its object URL so an externally
-  // triggered stop (the clip never reaches onended) doesn't leak the blob or leave the
-  // active flag set.
+  // turn). Also clears any in-flight FAQ clip state so an externally triggered stop (the
+  // clip never reaches onended) doesn't leave the active flag set. Removing the src aborts
+  // the in-flight HTTP range stream.
   const stopIntroVideo = useCallback(() => {
     const v = introVidRef.current
     if (v) {
@@ -154,52 +151,33 @@ export default function App() {
       try { v.load() } catch { /* ignore */ }
     }
     faqVideoActiveRef.current = false
-    if (faqObjUrlRef.current) {
-      URL.revokeObjectURL(faqObjUrlRef.current)
-      faqObjUrlRef.current = null
-    }
     setIntroActive(false)
   }, [])
 
-  // Fetch the intro MP4 as a blob (WITH the ngrok skip header that a <video src> can't
-  // send) and expose it as an object URL. Deduped + cached for the page lifetime.
-  const loadIntroBlob = useCallback((url: string): Promise<string | null> => {
-    if (introObjUrlRef.current) return Promise.resolve(introObjUrlRef.current)
-    if (introBlobPromiseRef.current) return introBlobPromiseRef.current
-    const p = fetch(backendHttpUrl(url), { headers: { 'ngrok-skip-browser-warning': 'true' } })
-      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.blob() })
-      .then((blob) => {
-        const obj = URL.createObjectURL(blob)
-        introObjUrlRef.current = obj
-        return obj
-      })
-      .catch((err) => {
-        // eslint-disable-next-line no-console
-        console.warn('[intro] blob fetch failed', err)
-        introBlobPromiseRef.current = null
-        return null
-      })
-    introBlobPromiseRef.current = p
-    return p
-  }, [])
-
-  // Free the intro-MP4 blob on unmount so it isn't pinned in memory beyond the page's
-  // life (the browser also revokes on navigation; this covers embedded/non-kiosk use).
-  useEffect(() => () => {
-    if (introObjUrlRef.current) {
-      URL.revokeObjectURL(introObjUrlRef.current)
-      introObjUrlRef.current = null
+  // Warm the intro MP4 ahead of the tap. With progressive streaming there's no blob to
+  // pre-build — we just point the <video> at the URL and let it preload metadata + the
+  // opening segment, so play() inside the tap gesture starts almost instantly.
+  const preloadIntro = useCallback((url: string) => {
+    const v = introVidRef.current
+    if (!v) return
+    const srcUrl = backendHttpUrl(url)
+    if (v.getAttribute('src') !== srcUrl) {
+      v.preload = 'auto'
+      v.src = srcUrl
+      try { v.load() } catch { /* ignore */ }
     }
   }, [])
 
-  // Warm the blob ahead of the tap so play() inside the gesture is instant.
-  const preloadIntro = useCallback((url: string) => {
-    void loadIntroBlob(url)
-  }, [loadIntroBlob])
-
   // Play (or replay) the prebuilt intro MP4. Started from the tap-to-start overlay's
-  // onClick, which establishes the sticky user activation that lets it play with sound
-  // (the activation persists across the async blob fetch).
+  // onClick, which establishes the sticky user activation that lets it play with sound.
+  //
+  // PROGRESSIVE STREAMING: the <video src> is set directly to the backend URL so the
+  // browser streams the MP4 via HTTP range requests and starts playing after only the
+  // first segment buffers — instead of downloading the whole ~100 MB blob first. The MP4
+  // is encoded with +faststart (moov atom up front) and served by FastAPI FileResponse,
+  // which honours Range, so playback begins almost immediately. The blob-fetch was only
+  // ever needed for the retired ngrok interstitial; Cloudflare has none. The ?v=<version>
+  // cache-buster on the URL is preserved by passing it through to the src.
   const playIntroVideo = useCallback((url: string) => {
     const v = introVidRef.current
     if (!v) return
@@ -221,41 +199,36 @@ export default function App() {
       // eslint-disable-next-line no-console
       console.info('[intro]', reason, { code: v.error?.code, networkState: v.networkState, readyState: v.readyState, src: v.currentSrc })
     }
-    const startPlayback = (srcUrl: string) => {
-      if (settled) return
-      v.onended = () => finish('done')
-      v.onerror = () => finish(`error code=${v.error?.code ?? '?'}`, 'err')
-      if (v.getAttribute('src') !== srcUrl) { v.src = srcUrl; try { v.load() } catch { /* ignore */ } }
-      try { v.currentTime = 0 } catch { /* ignore */ }
-      v.muted = false
-      const p = v.play()
-      if (p) {
-        p.then(() => log('intro playing', 'ok')).catch((e: unknown) => {
-          // Autoplay-with-sound blocked — show the clip muted rather than nothing.
-          const name = e instanceof Error ? e.name : String(e)
-          // eslint-disable-next-line no-console
-          console.warn('[intro] play() rejected, retrying muted:', name)
-          v.muted = true
-          v.play().then(() => log('intro playing (muted)', 'ok')).catch((e2: unknown) => {
-            finish(`blocked ${e2 instanceof Error ? e2.name : String(e2)}`, 'err')
-          })
+    const srcUrl = backendHttpUrl(url)
+    v.onended = () => finish('done')
+    v.onerror = () => finish(`error code=${v.error?.code ?? '?'}`, 'err')
+    if (v.getAttribute('src') !== srcUrl) { v.src = srcUrl; try { v.load() } catch { /* ignore */ } }
+    try { v.currentTime = 0 } catch { /* ignore */ }
+    v.muted = false
+    const p = v.play()
+    if (p) {
+      p.then(() => log('intro playing', 'ok')).catch((e: unknown) => {
+        // Autoplay-with-sound blocked — show the clip muted rather than nothing.
+        const name = e instanceof Error ? e.name : String(e)
+        // eslint-disable-next-line no-console
+        console.warn('[intro] play() rejected, retrying muted:', name)
+        v.muted = true
+        v.play().then(() => log('intro playing (muted)', 'ok')).catch((e2: unknown) => {
+          finish(`blocked ${e2 instanceof Error ? e2.name : String(e2)}`, 'err')
         })
-      }
-    }
-    if (introObjUrlRef.current) {
-      startPlayback(introObjUrlRef.current)
-    } else {
-      void loadIntroBlob(url).then((obj) => {
-        if (obj) startPlayback(obj)
-        else finish('fetch failed', 'err')
       })
     }
-  }, [log, loadIntroBlob])
+  }, [log])
 
   // Play a prebuilt FAQ answer clip in the shared intro <video> element. Mirrors
-  // playIntroVideo but fetches a fresh per-URL blob (FAQ URLs vary; the intro reuses one
-  // cached blob) and revokes it when the clip ends/stops. By the time a FAQ clip arrives
-  // the user has already interacted (asked a question), so sticky activation permits sound.
+  // playIntroVideo. By the time a FAQ clip arrives the user has already interacted (asked a
+  // question), so sticky activation permits sound.
+  //
+  // PROGRESSIVE STREAMING (same as the intro): the <video src> points straight at the
+  // backend URL so the browser streams the ~20-25 MB MP4 via HTTP range requests and starts
+  // playing after the first segment buffers, instead of blob-downloading the whole file
+  // first (which made FAQ clips glitch / start late). The clips are +faststart-encoded and
+  // served via FastAPI FileResponse (Range-capable). The ?v=<version> query is preserved.
   const playCachedVideo = useCallback((url: string) => {
     const v = introVidRef.current
     if (!v) return
@@ -271,44 +244,29 @@ export default function App() {
       v.onended = null
       v.onerror = null
       faqVideoActiveRef.current = false
-      if (faqObjUrlRef.current) {
-        URL.revokeObjectURL(faqObjUrlRef.current)
-        faqObjUrlRef.current = null
-      }
       setIntroActive(false)
       setMode('idle')
       setIsBusy(false)
       isBusyRef.current = false
       log(`faq video ${reason}`, cls)
     }
-    const startPlayback = (srcUrl: string) => {
-      if (settled) return
-      v.onended = () => finish('done')
-      v.onerror = () => finish(`error code=${v.error?.code ?? '?'}`, 'err')
-      v.src = srcUrl
-      try { v.load() } catch { /* ignore */ }
-      try { v.currentTime = 0 } catch { /* ignore */ }
-      v.muted = false
-      const p = v.play()
-      if (p) {
-        p.then(() => log('faq video playing', 'ok')).catch(() => {
-          // Autoplay-with-sound blocked — fall back to muted rather than nothing.
-          v.muted = true
-          v.play().then(() => log('faq video playing (muted)', 'ok')).catch((e2: unknown) => {
-            finish(`blocked ${e2 instanceof Error ? e2.name : String(e2)}`, 'err')
-          })
+    const srcUrl = backendHttpUrl(url)
+    v.onended = () => finish('done')
+    v.onerror = () => finish(`error code=${v.error?.code ?? '?'}`, 'err')
+    v.src = srcUrl
+    try { v.load() } catch { /* ignore */ }
+    try { v.currentTime = 0 } catch { /* ignore */ }
+    v.muted = false
+    const p = v.play()
+    if (p) {
+      p.then(() => log('faq video playing', 'ok')).catch(() => {
+        // Autoplay-with-sound blocked — fall back to muted rather than nothing.
+        v.muted = true
+        v.play().then(() => log('faq video playing (muted)', 'ok')).catch((e2: unknown) => {
+          finish(`blocked ${e2 instanceof Error ? e2.name : String(e2)}`, 'err')
         })
-      }
-    }
-    fetch(backendHttpUrl(url), { headers: { 'ngrok-skip-browser-warning': 'true' } })
-      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.blob() })
-      .then((blob) => {
-        if (settled) return
-        const obj = URL.createObjectURL(blob)
-        faqObjUrlRef.current = obj
-        startPlayback(obj)
       })
-      .catch((err) => finish(`fetch failed ${err instanceof Error ? err.message : String(err)}`, 'err'))
+    }
   }, [log])
 
 

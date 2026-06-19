@@ -83,15 +83,33 @@ export function conversationReducer(
     }
 
     case 'answer_payload': {
+      // Write the final answer text onto the active avatar message. If there is no active
+      // message id yet (e.g. intro / FAQ-video turns where the payload can arrive before a
+      // response_chunk created one, or a 'done' raced ahead and cleared the id), do NOT
+      // drop the text — fall back to the last avatar message, or append a fresh one. This
+      // guarantees intro + FAQ answers always render in the chat.
       const id = state.aiMessageId
+      const text = action.formattedText
+      const base = state.messages.filter((m) => m.id !== 'typing')
+      let messages = base
+      if (id && base.some((m) => m.id === id)) {
+        messages = base.map((m) => (m.id === id ? { ...m, text } : m))
+      } else {
+        // Reuse the trailing avatar bubble if the stream already created one; else append.
+        const lastAvatarIdx = [...base].reverse().findIndex((m) => m.role === 'avatar')
+        if (lastAvatarIdx !== -1) {
+          const realIdx = base.length - 1 - lastAvatarIdx
+          messages = base.map((m, i) => (i === realIdx ? { ...m, text } : m))
+        } else if (text.trim()) {
+          messages = [...base, { id: id ?? uid(), role: 'avatar' as const, text }]
+        }
+      }
       return {
         ...state,
         activeAnswer: action.answer,
         answerPayloadReceived: true,
-        assistantStreamBuffer: action.formattedText,
-        messages: id
-          ? state.messages.map((m) => (m.id === id ? { ...m, text: action.formattedText } : m))
-          : state.messages,
+        assistantStreamBuffer: text,
+        messages,
       }
     }
 
