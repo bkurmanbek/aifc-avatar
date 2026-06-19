@@ -15,10 +15,10 @@ const CROSS_CHUNK_PRELOAD = 12
 // a lead, playback races production and starves whenever SyncTalk render jitters, causing
 // recurring transition gaps. The lead must exceed (max segment duration + render margin)
 // so the next segment is always ready before the current one ends.
-// Lowered 2.2 -> 1.4s to cut perceived start latency (~0.8s sooner). Viable because the
-// lean q82 stream + EU TTS keep production comfortably ahead; if transition gaps reappear
-// on jittery networks, raise it back toward 2.0.
-const LIVE_PREBUFFER_S = 1.4
+// 2.0s lead: 1.4s caused transition stutters in practice (production couldn't stay ahead on
+// jittery networks); 2.0 restores margin while still ~0.2s faster perceived start than the
+// original 2.2. Raise toward 2.2+ if stutters persist; lower only if the network is reliably fast.
+const LIVE_PREBUFFER_S = 2.0
 // How many chunks ahead of the playing one we pre-schedule audio for (gapless seams).
 const AUDIO_SCHEDULE_LOOKAHEAD = 6
 const FRAME_CACHE_INITIAL_LIMIT = 48
