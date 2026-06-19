@@ -47,8 +47,19 @@ def env_bool(name: str, default: bool) -> bool:
 APP_HOST = os.getenv("WS_BACKEND_HOST", "0.0.0.0")
 APP_PORT = env_int("WS_BACKEND_PORT", 8080)
 
-SONIOX_API_KEY = os.getenv("SONIOX_API_KEY", os.getenv("SONIOX_KEY", ""))
-SONIOX_STT_WS_URL = os.getenv("SONIOX_STT_WS_URL", "wss://stt-rt.soniox.com/transcribe-websocket")
+# Region preference: if the EU Soniox vars are present (SONIOX_API_KEY_EU + the EU host
+# vars SONIOX_{STT,TTS}_WEBSOCKET_EU_API), use the EU PoP — measured ~37% lower TTS
+# first-chunk latency from Kazakhstan (203ms EU vs 323ms US). An explicit SONIOX_*_WS_URL
+# still wins. The EU endpoints require the EU key (region-bound), so they're selected together.
+_SONIOX_EU_KEY = (os.getenv("SONIOX_API_KEY_EU") or "").strip()
+_SONIOX_STT_EU_HOST = (os.getenv("SONIOX_STT_WEBSOCKET_EU_API") or "").strip()
+_SONIOX_TTS_EU_HOST = (os.getenv("SONIOX_TTS_WEBSOCKET_EU_API") or "").strip()
+
+SONIOX_API_KEY = _SONIOX_EU_KEY or os.getenv("SONIOX_API_KEY", os.getenv("SONIOX_KEY", ""))
+SONIOX_STT_WS_URL = os.getenv("SONIOX_STT_WS_URL") or (
+    f"wss://{_SONIOX_STT_EU_HOST}/transcribe-websocket" if _SONIOX_STT_EU_HOST
+    else "wss://stt-rt.soniox.com/transcribe-websocket"
+)
 SONIOX_STT_MODEL = os.getenv("SONIOX_STT_MODEL", "stt-rt-v5")
 SONIOX_STT_AUDIO_FORMAT = os.getenv("SONIOX_STT_AUDIO_FORMAT", "pcm_s16le")
 SONIOX_STT_SAMPLE_RATE = env_int("SONIOX_STT_SAMPLE_RATE", 16000)
@@ -74,8 +85,11 @@ SONIOX_STT_PRECONNECT = env_bool("SONIOX_STT_PRECONNECT", True)
 SONIOX_STT_KEEPALIVE_INTERVAL_S = env_float("SONIOX_STT_KEEPALIVE_INTERVAL_S", 5.0)
 SONIOX_STT_CONTEXT_MAX_CHARS = env_int("SONIOX_STT_CONTEXT_MAX_CHARS", 10000)
 
-SONIOX_TTS_API_KEY = os.getenv("SONIOX_TTS_API_KEY", SONIOX_API_KEY)
-SONIOX_TTS_WS_URL = os.getenv("SONIOX_TTS_WS_URL", "wss://tts-rt.soniox.com/tts-websocket")
+SONIOX_TTS_API_KEY = os.getenv("SONIOX_TTS_API_KEY") or SONIOX_API_KEY
+SONIOX_TTS_WS_URL = os.getenv("SONIOX_TTS_WS_URL") or (
+    f"wss://{_SONIOX_TTS_EU_HOST}/tts-websocket" if _SONIOX_TTS_EU_HOST
+    else "wss://tts-rt.soniox.com/tts-websocket"
+)
 SONIOX_TTS_MODEL = os.getenv("SONIOX_TTS_MODEL", "tts-rt-v1")
 SONIOX_TTS_VOICE = os.getenv("SONIOX_TTS_VOICE", "Maya")
 SONIOX_TTS_INTRO_LANGUAGE = os.getenv("SONIOX_TTS_INTRO_LANGUAGE", "en")
