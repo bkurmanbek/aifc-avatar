@@ -60,6 +60,7 @@ from ..intro import (
     intro_audio_path as _intro_audio_path,
     intro_frame_cache_info as _intro_frame_cache_info,
     intro_video_is_valid as _intro_video_is_valid,
+    intro_video_signature as _intro_video_signature,
     intro_video_url as _intro_video_url,
     intro_token_in_progress as _intro_token_in_progress,
     intro_token_seen as _intro_token_seen,
@@ -419,7 +420,10 @@ class ClientSession:
             # Prefer the prebuilt combined MP4 (hardware-decoded, stutter-free). Falls back
             # to per-block canvas streaming when the video isn't cached yet.
             if _intro_video_is_valid(intro_blocks):
-                await self.writer.send({"type": "intro_video", "url": _intro_video_url(), "turn_id": turn_id})
+                # Append a content version so a rebuilt intro busts the browser's immutable
+                # cache (the URL is otherwise static -> clients keep serving the old clip).
+                intro_url = f"{_intro_video_url()}?v={_intro_video_signature(intro_blocks)[:8]}"
+                await self.writer.send({"type": "intro_video", "url": intro_url, "turn_id": turn_id})
             else:
                 for index, block in enumerate(intro_blocks):
                     await self.writer.send({"type": "status", "turn_id": turn_id, "text": f"Streaming cached intro block {index + 1}/{len(intro_blocks)}: {block.key}"})
@@ -970,23 +974,20 @@ class ClientSession:
                 # fragment. We keep the streamed fragment (can't un-speak it) and skip the
                 # winner's text to avoid doubling — log it so it's visible if it recurs.
                 log_event(log, "spoken_stream_winner_mismatch", session_id=self.session_id, request_id=turn_id, winner_source=race_result.winner.source, level=logging.WARNING)
-            # FAQ video cache: on a confident FAQ fast-path win, if a prebuilt MP4 exists for
-            # this exact spoken text, send it instead of rendering TTS->SyncTalk live. The MP4
-            # carries audio + frames (hardware-decoded on the client), so we skip emitting the
-            # spoken text to the avatar pipeline. Chat text still flows so the panel updates.
-            # Cache miss -> falls through to the normal live render. (FAQ never streams via
-            # on_spoken_delta, so winner_already_streamed is False on a real FAQ win.)
+            # FAQ video cache: if a prebuilt MP4 exists for this EXACT spoken text, send it
+            # instead of rendering TTS->SyncTalk live. The MP4 carries audio + frames
+            # (hardware-decoded on the client), so we skip emitting the spoken text to the
+            # avatar pipeline; chat text still flows. Cache miss -> normal live render.
+            # Keyed on spoken text, NOT winner.source: a FAQ answer can win via the `faq`
+            # candidate OR be replayed by the `semantic_cache` (which caches the same
+            # raw_answer) — both must serve the video. Only requirement: nothing was already
+            # streamed (gemini_* stream their spoken field and can't be swapped mid-flight).
             faq_video_served = False
-            if (
-                FAQ_VIDEO_ENABLED
-                and not winner_already_streamed
-                and race_result is not None
-                and race_result.winner.source == "faq"
-            ):
+            if FAQ_VIDEO_ENABLED and not winner_already_streamed:
                 faq_url = _lookup_faq_video(spoken, language)
                 if faq_url:
                     await self.writer.send({"type": "faq_video", "url": faq_url, "turn_id": turn_id})
-                    log_event(log, "faq_video_served", session_id=self.session_id, request_id=turn_id, url=faq_url)
+                    log_event(log, "faq_video_served", session_id=self.session_id, request_id=turn_id, url=faq_url, winner_source=getattr(getattr(race_result, "winner", None), "source", "direct"))
                     faq_video_served = True
             if not winner_already_streamed and not faq_video_served:
                 await stream.emit_spoken_text(spoken)
