@@ -397,6 +397,22 @@ def intro_video_url() -> str:
     return f"/intro-video/{safe_cache_key(INTRO_AVATAR_CACHE_KEY)}/intro.mp4"
 
 
+def file_cache_version(path: Path) -> str:
+    """Short token from a file's size+mtime, appended as ?v= to bust CDN/browser caches when
+    the file CONTENT changes (e.g. a re-encode) but the URL stays the same. The video routes
+    are served `immutable` so Cloudflare/edge caches them by URL — without this, a rebuilt
+    higher-quality MP4 keeps serving the old cached bytes for up to 24h."""
+    try:
+        st = path.stat()
+        return f"{st.st_size:x}-{int(st.st_mtime):x}"
+    except OSError:
+        return "0"
+
+
+def intro_video_url_versioned() -> str:
+    return f"{intro_video_url()}?v={file_cache_version(intro_video_path())}"
+
+
 def intro_video_signature(blocks: list[IntroBlock]) -> str:
     payload = {
         "cache_version": 1,

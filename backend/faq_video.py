@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 
 from .settings import INTRO_AVATAR_CACHE_KEY, ROOT, SONIOX_TTS_VOICE
-from .intro import encode_frames_to_mp4, safe_cache_key
+from .intro import encode_frames_to_mp4, file_cache_version, safe_cache_key
 from .media.tts import SonioxRealtimeTTS
 from .media.synctalk import SyncTalkClient
 
@@ -78,8 +78,10 @@ def lookup_faq_video(spoken: str, language: str, voice: str | None = None) -> st
     if not (spoken or "").strip():
         return None
     key = faq_video_key(spoken, language, voice)
-    if _is_present(faq_video_path(key)):
-        return faq_video_url(key)
+    path = faq_video_path(key)
+    if _is_present(path):
+        # ?v=<file version> busts CDN/browser caches when the MP4 is re-encoded (same key/URL).
+        return f"{faq_video_url(key)}?v={file_cache_version(path)}"
     return None
 
 

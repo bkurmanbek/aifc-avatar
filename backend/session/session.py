@@ -60,8 +60,7 @@ from ..intro import (
     intro_audio_path as _intro_audio_path,
     intro_frame_cache_info as _intro_frame_cache_info,
     intro_video_is_valid as _intro_video_is_valid,
-    intro_video_signature as _intro_video_signature,
-    intro_video_url as _intro_video_url,
+    intro_video_url_versioned as _intro_video_url_versioned,
     intro_token_in_progress as _intro_token_in_progress,
     intro_token_seen as _intro_token_seen,
     load_intro_blocks as _load_intro_blocks,
@@ -450,10 +449,9 @@ class ClientSession:
             # Prefer the prebuilt combined MP4 (hardware-decoded, stutter-free). Falls back
             # to per-block canvas streaming when the video isn't cached yet.
             if _intro_video_is_valid(intro_blocks):
-                # Append a content version so a rebuilt intro busts the browser's immutable
-                # cache (the URL is otherwise static -> clients keep serving the old clip).
-                intro_url = f"{_intro_video_url()}?v={_intro_video_signature(intro_blocks)[:8]}"
-                await self.writer.send({"type": "intro_video", "url": intro_url, "turn_id": turn_id})
+                # File-version ?v so a rebuilt intro busts the Cloudflare edge + browser
+                # immutable cache (static URL -> stale low-q clip otherwise).
+                await self.writer.send({"type": "intro_video", "url": _intro_video_url_versioned(), "turn_id": turn_id})
             else:
                 for index, block in enumerate(intro_blocks):
                     await self.writer.send({"type": "status", "turn_id": turn_id, "text": f"Streaming cached intro block {index + 1}/{len(intro_blocks)}: {block.key}"})
