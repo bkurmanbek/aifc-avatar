@@ -124,6 +124,9 @@ ANSWER_RACE_TIMEOUT_MS = env_int("ANSWER_RACE_TIMEOUT_MS", 250)
 ANSWER_CACHE_TTL_S = env_float("ANSWER_CACHE_TTL_S", 1800.0)
 GEMINI_RAG_MAX_WAIT_MS = env_int("GEMINI_RAG_MAX_WAIT_MS", 12000)
 FAQ_WIN_THRESHOLD = env_float("FAQ_WIN_THRESHOLD", 0.90)
+# Serve a prebuilt FAQ answer MP4 (cache/faq/video, see faq_video.py) on a confident FAQ
+# fast-path win instead of rendering TTS->SyncTalk live. Cache miss -> live render.
+FAQ_VIDEO_ENABLED = env_bool("FAQ_VIDEO_ENABLED", True)
 CACHE_WIN_THRESHOLD = env_float("CACHE_WIN_THRESHOLD", 0.90)
 LOCAL_RAG_HIGH_THRESHOLD = env_float("LOCAL_RAG_HIGH_THRESHOLD", 0.65)
 LOCAL_RAG_PARTIAL_THRESHOLD = env_float("LOCAL_RAG_PARTIAL_THRESHOLD", 0.45)

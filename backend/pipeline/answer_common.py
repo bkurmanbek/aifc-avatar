@@ -330,11 +330,17 @@ def candidate_from_answer(
     chunks: list[dict] | None = None,
     citations: list[str] | None = None,
     cacheable: bool = False,
+    trim_spoken: bool = True,
 ) -> RaceCandidate:
     chunks = chunks or []
     citations = citations if citations is not None else _citations(chunks)
-    spoken = _trim_for_first_spoken(answer)
-    chat_answer = sanitize_spoken_text(answer, keep_digits=True) or spoken
+    # trim_spoken caps the spoken field to the first few sentences / 75 words for latency on
+    # the streaming path (the rest streams in after). A pre-baked FAQ answer has no streaming
+    # continuation, so trimming there just drops the tail — FAQ passes trim_spoken=False to
+    # speak the full answer.
+    chat_answer = sanitize_spoken_text(answer, keep_digits=True)
+    spoken = _trim_for_first_spoken(answer) if trim_spoken else (chat_answer or _trim_for_first_spoken(answer))
+    chat_answer = chat_answer or spoken
     return RaceCandidate(
         source=source,
         confidence=confidence,

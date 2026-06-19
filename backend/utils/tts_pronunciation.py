@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .spoken_text import (
+    clean_links_and_ranges,
     normalize_spoken_numbers,
     remove_repeated_sentences,
     sanitize_spoken_text,
@@ -17,6 +18,7 @@ def prepare_tts_text(
     del expand_context_terms
     speech_lang = _speech_lang(language)
     prepared = text or ""
+    prepared = clean_links_and_ranges(prepared, speech_lang)
     prepared = sanitize_spoken_text(prepared, keep_digits=True)
     prepared = normalize_spoken_numbers(prepared, speech_lang)
     prepared = sentenceize_spoken_text(prepared, speech_lang)

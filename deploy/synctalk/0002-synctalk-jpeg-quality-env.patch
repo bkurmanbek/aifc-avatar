@@ -1,0 +1,46 @@
+From 2a7dfe91935cc94908fb56b49e7632b94ede4c0d Mon Sep 17 00:00:00 2001
+From: bkurmanbek <bakytzhan.kurmanbek@nu.edu.kz>
+Date: Fri, 19 Jun 2026 07:29:22 +0000
+Subject: [PATCH] feat: env-configurable output JPEG quality
+ (SYNCTALK_JPEG_QUALITY, default 82)
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ synctalk_server.py | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/synctalk_server.py b/synctalk_server.py
+index 1aea5ba..a335fa3 100644
+--- a/synctalk_server.py
++++ b/synctalk_server.py
+@@ -69,6 +69,8 @@ _FAST_COMPOSITE = os.getenv("SYNCTALK_FAST_COMPOSITE", "0") == "1"
+ # nvJPEG hardware engine (torchvision, ~0.26 ms/f) instead of CPU cv2.imencode (~1.83 ms/f).
+ # Output is standard JPEG so the frontend/transport is unchanged. SYNCTALK_GPU_JPEG=1.
+ _GPU_JPEG = os.getenv("SYNCTALK_GPU_JPEG", "0") == "1"
++# JPEG encode quality for output frames (1-100). Higher = sharper (esp. mouth) + larger.
++_JPEG_QUALITY = int(os.getenv("SYNCTALK_JPEG_QUALITY", "82"))
+ if _GPU_JPEG:
+     from torchvision.io import encode_jpeg as _tv_encode_jpeg
+ 
+@@ -326,15 +328,15 @@ def _encode_b64(outs: list) -> list:
+     """Encode a list of BGR 540x960 frames to base64 JPEG strings.
+     GPU path (nvJPEG) when SYNCTALK_GPU_JPEG=1, else CPU cv2.imencode."""
+     if not _GPU_JPEG:
+-        return [base64.b64encode(cv2.imencode(".jpg", o, [cv2.IMWRITE_JPEG_QUALITY, 82])[1]).decode()
++        return [base64.b64encode(cv2.imencode(".jpg", o, [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY])[1]).decode()
+                 for o in outs]
+     # nvJPEG wants RGB CHW uint8. Stack the batch, flip BGR->RGB, move once to GPU.
+     arr = np.ascontiguousarray(np.stack(outs)[..., ::-1])      # [N,H,W,3] RGB
+     t = torch.from_numpy(arr).to(device, non_blocking=True).permute(0, 3, 1, 2).contiguous()
+     try:
+-        encoded = _tv_encode_jpeg([t[i] for i in range(t.shape[0])], quality=82)  # batched CUDA
++        encoded = _tv_encode_jpeg([t[i] for i in range(t.shape[0])], quality=_JPEG_QUALITY)  # batched CUDA
+     except (TypeError, RuntimeError):
+-        encoded = [_tv_encode_jpeg(t[i], quality=82) for i in range(t.shape[0])]
++        encoded = [_tv_encode_jpeg(t[i], quality=_JPEG_QUALITY) for i in range(t.shape[0])]
+     return [base64.b64encode(e.cpu().numpy().tobytes()).decode() for e in encoded]
+ 
+ 
+-- 
+2.34.1
+

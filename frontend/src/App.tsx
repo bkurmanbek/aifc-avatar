@@ -83,6 +83,10 @@ export default function App() {
   // via fetch() WITH the skip header and play it from a blob object URL.
   const introObjUrlRef = useRef<string | null>(null)
   const introBlobPromiseRef = useRef<Promise<string | null> | null>(null)
+  // Prebuilt FAQ answer clip (reuses the intro <video> element). faqVideoActiveRef lets the
+  // 'done' handler skip the canvas onAllDone->idle while the clip owns the speaking state.
+  const faqVideoActiveRef = useRef(false)
+  const faqObjUrlRef = useRef<string | null>(null)
   const idleTimerRef = useRef<{ reset: () => void; clear: () => void }>({ reset: () => {}, clear: () => {} })
 
   useEffect(() => {
@@ -136,7 +140,10 @@ export default function App() {
     return Boolean(turnId && activeTurnIdRef.current !== turnId)
   }, [])
 
-  // Stop and hide the intro MP4 (used on barge-in, interrupt, error, or new turn).
+  // Stop and hide the shared intro/FAQ <video> (used on barge-in, interrupt, error, or new
+  // turn). Also tears down any in-flight FAQ clip state + its object URL so an externally
+  // triggered stop (the clip never reaches onended) doesn't leak the blob or leave the
+  // active flag set.
   const stopIntroVideo = useCallback(() => {
     const v = introVidRef.current
     if (v) {
@@ -145,6 +152,11 @@ export default function App() {
       try { v.pause() } catch { /* ignore */ }
       v.removeAttribute('src')
       try { v.load() } catch { /* ignore */ }
+    }
+    faqVideoActiveRef.current = false
+    if (faqObjUrlRef.current) {
+      URL.revokeObjectURL(faqObjUrlRef.current)
+      faqObjUrlRef.current = null
     }
     setIntroActive(false)
   }, [])
@@ -239,6 +251,65 @@ export default function App() {
       })
     }
   }, [log, loadIntroBlob])
+
+  // Play a prebuilt FAQ answer clip in the shared intro <video> element. Mirrors
+  // playIntroVideo but fetches a fresh per-URL blob (FAQ URLs vary; the intro reuses one
+  // cached blob) and revokes it when the clip ends/stops. By the time a FAQ clip arrives
+  // the user has already interacted (asked a question), so sticky activation permits sound.
+  const playCachedVideo = useCallback((url: string) => {
+    const v = introVidRef.current
+    if (!v) return
+    faqVideoActiveRef.current = true
+    setIsBusy(true)
+    isBusyRef.current = true
+    setMode('speaking')
+    setIntroActive(true)
+    let settled = false
+    const finish = (reason: string, cls: string = 'ok') => {
+      if (settled) return
+      settled = true
+      v.onended = null
+      v.onerror = null
+      faqVideoActiveRef.current = false
+      if (faqObjUrlRef.current) {
+        URL.revokeObjectURL(faqObjUrlRef.current)
+        faqObjUrlRef.current = null
+      }
+      setIntroActive(false)
+      setMode('idle')
+      setIsBusy(false)
+      isBusyRef.current = false
+      log(`faq video ${reason}`, cls)
+    }
+    const startPlayback = (srcUrl: string) => {
+      if (settled) return
+      v.onended = () => finish('done')
+      v.onerror = () => finish(`error code=${v.error?.code ?? '?'}`, 'err')
+      v.src = srcUrl
+      try { v.load() } catch { /* ignore */ }
+      try { v.currentTime = 0 } catch { /* ignore */ }
+      v.muted = false
+      const p = v.play()
+      if (p) {
+        p.then(() => log('faq video playing', 'ok')).catch(() => {
+          // Autoplay-with-sound blocked — fall back to muted rather than nothing.
+          v.muted = true
+          v.play().then(() => log('faq video playing (muted)', 'ok')).catch((e2: unknown) => {
+            finish(`blocked ${e2 instanceof Error ? e2.name : String(e2)}`, 'err')
+          })
+        })
+      }
+    }
+    fetch(backendHttpUrl(url), { headers: { 'ngrok-skip-browser-warning': 'true' } })
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.blob() })
+      .then((blob) => {
+        if (settled) return
+        const obj = URL.createObjectURL(blob)
+        faqObjUrlRef.current = obj
+        startPlayback(obj)
+      })
+      .catch((err) => finish(`fetch failed ${err instanceof Error ? err.message : String(err)}`, 'err'))
+  }, [log])
 
 
   const sendTextPrompt = useCallback((text: string) => {
@@ -402,6 +473,17 @@ export default function App() {
           }
           break
         }
+        case 'faq_video': {
+          if (isStaleTurn(msg.turn_id)) return
+          // Prebuilt FAQ answer clip — hardware-decoded, bypasses the canvas frame pipeline.
+          // The canvas stream started on response_start gets zero frames; stop it and let
+          // the clip own the speaking state (the 'done' handler skips onAllDone while
+          // faqVideoActiveRef is set). Listen during the clip so barge-in still works.
+          playbackRef.current.stopPlayback()
+          playCachedVideo(msg.url)
+          void micRef.current.ensureActiveListening()
+          break
+        }
         case 'chunk_done': {
           if (isStaleTurn(msg.turn_id)) return
           const chunk = msg.chunk ?? 0
@@ -425,7 +507,10 @@ export default function App() {
           }
           log(`${msg.chunks ?? 1} chunk(s)`, 'ok')
           emitClientLog('info', 'pipeline.done', 'turn completed', { turnId: msg.turn_id, latencyMs: msg.latency_ms })
-          playbackRef.current.onAllDone(msg.chunks ?? 1)
+          // A FAQ-video turn produces zero canvas chunks; onAllDone(0) would fire
+          // onAllChunksDone -> idle immediately, cutting the clip short. The clip's own
+          // onended drives idle/busy instead.
+          if (!faqVideoActiveRef.current) playbackRef.current.onAllDone(msg.chunks ?? 1)
           break
         case 'status':
           if (isStaleTurn(msg.turn_id)) return

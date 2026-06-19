@@ -108,7 +108,10 @@ def _sentenceize_word_language(text: str) -> str:
         if not punct:
             continue
 
-        if punct in ",;:" and _clause_should_be_sentence(current):
+        # Only promote a clause to its own sentence on a STRONG boundary (; or :). A comma
+        # is kept in place — TTS reads it as a natural pause. Splitting on commas produced
+        # unnatural breaks + wrong capitalization (e.g. "...a business. Attract talent...").
+        if punct in ";:" and _clause_should_be_sentence(current):
             output.append(current.rstrip(" ,;:") + ".")
             current = ""
         else:
@@ -278,6 +281,8 @@ def _spell_kk_number(value: int) -> str:
         return f"теріс {_spell_kk_number(-value)}"
     if value < 10:
         return _KK_ONES[value]
+    if value == 10:
+        return "он"
     if value < 20:
         return f"он {_KK_ONES[value - 10]}"
     if value < 100:
@@ -392,8 +397,117 @@ def _normalize_number_token(token: str) -> str:
     return token
 
 
+# ── Years, emails/URLs, numeric ranges ───────────────────────────────────────
+# 4-digit years (1900–2099), optionally followed by a year word, read naturally instead of
+# as a giant cardinal ("2026" → "twenty twenty-six" / «две тысячи двадцать шестого года»).
+_YEAR_RE = re.compile(
+    r"(?<![\w.,])(?P<y>1[89]\d{2}|20\d{2})(?![\w])(?![.,]\d)(?P<w>\s+(?:года|году|год|годом|годе|жыл\w*))?",
+    re.IGNORECASE | re.UNICODE,
+)
+# cardinal last-word → ordinal genitive (RU), used for "<year> года/году"
+_RU_ORD_GEN = {
+    "один": "первого", "два": "второго", "три": "третьего", "четыре": "четвёртого",
+    "пять": "пятого", "шесть": "шестого", "семь": "седьмого", "восемь": "восьмого",
+    "девять": "девятого", "десять": "десятого",
+    "одиннадцать": "одиннадцатого", "двенадцать": "двенадцатого", "тринадцать": "тринадцатого",
+    "четырнадцать": "четырнадцатого", "пятнадцать": "пятнадцатого", "шестнадцать": "шестнадцатого",
+    "семнадцать": "семнадцатого", "восемнадцать": "восемнадцатого", "девятнадцать": "девятнадцатого",
+    "двадцать": "двадцатого", "тридцать": "тридцатого", "сорок": "сорокового",
+    "пятьдесят": "пятидесятого", "шестьдесят": "шестидесятого", "семьдесят": "семидесятого",
+    "восемьдесят": "восьмидесятого", "девяносто": "девяностого",
+    "сто": "сотого", "двести": "двухсотого", "триста": "трёхсотого", "четыреста": "четырёхсотого",
+    "пятьсот": "пятисотого", "шестьсот": "шестисотого", "семьсот": "семисотого",
+    "восемьсот": "восьмисотого", "девятьсот": "девятисотого",
+}
+# cardinal last-word → ordinal (KK), used for "<year> жыл(ы)"
+_KK_ORD = {
+    "бір": "бірінші", "екі": "екінші", "үш": "үшінші", "төрт": "төртінші", "бес": "бесінші",
+    "алты": "алтыншы", "жеті": "жетінші", "сегіз": "сегізінші", "тоғыз": "тоғызыншы",
+    "он": "оныншы", "жиырма": "жиырмасыншы", "отыз": "отызыншы", "қырық": "қырқыншы",
+    "елу": "елуінші", "алпыс": "алпысыншы", "жетпіс": "жетпісінші", "сексен": "сексенінші",
+    "тоқсан": "тоқсаныншы", "жүз": "жүзінші", "мың": "мыңыншы",
+}
+
+
+def _spell_en_year(y: int) -> str:
+    if 2000 <= y <= 2009:
+        return "two thousand" if y == 2000 else f"two thousand {_spell_en_number(y % 100)}"
+    hi, lo = divmod(y, 100)
+    if lo == 0:
+        return f"{_spell_en_number(hi)} hundred"
+    if lo < 10:
+        return f"{_spell_en_number(hi)} oh {_spell_en_number(lo)}"
+    return f"{_spell_en_number(hi)} {_spell_en_number(lo)}"
+
+
+def _spell_ru_year(y: int, genitive: bool) -> str:
+    th, rest = divmod(y, 1000)
+    words = ["тысяча" if th == 1 else "две тысячи"] if th else []
+    if rest:
+        words.append(_spell_ru_number(rest))
+    cardinal = " ".join(words).strip()
+    if not genitive:
+        return cardinal
+    if rest == 0:
+        return {1: "тысячного", 2: "двухтысячного"}.get(th, cardinal)
+    toks = cardinal.split()
+    toks[-1] = _RU_ORD_GEN.get(toks[-1], toks[-1])
+    return " ".join(toks)
+
+
+def _spell_kk_year(y: int, ordinal: bool) -> str:
+    cardinal = _spell_kk_number(y)
+    if not ordinal:
+        return cardinal
+    toks = cardinal.split()
+    toks[-1] = _KK_ORD.get(toks[-1], toks[-1])
+    return " ".join(toks)
+
+
+def _replace_years(text: str, lang: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        year = int(match.group("y"))
+        follow = match.group("w") or ""
+        has_word = bool(follow.strip())
+        if lang == "ru":
+            return _spell_ru_year(year, genitive=has_word) + follow
+        if lang == "kk":
+            return _spell_kk_year(year, ordinal=has_word) + follow
+        if lang == "zh":
+            return "".join(_ZH_DIGITS[int(c)] for c in str(year)) + follow
+        return _spell_en_year(year) + follow
+
+    return _YEAR_RE.sub(repl, text)
+
+
+_URL_SCHEME_RE = re.compile(r"\bhttps?://", re.IGNORECASE)
+_WWW_RE = re.compile(r"\bwww\.", re.IGNORECASE)
+_EMAIL_RE = re.compile(r"([A-Za-z0-9._%+-]+)@([A-Za-z0-9.-]+\.[A-Za-z]{2,})")
+# digit–digit ranges with any unicode dash; keep them from merging into "nine ten".
+_RANGE_RE = re.compile(r"(?<![\w])(\d{1,4})\s*[‐-―−\-]\s*(\d{1,4})(?![\w])")
+_AT_WORD = {"en": "at", "ru": "собака", "kk": "собака", "zh": "艾特"}
+_RANGE_WORD = {"en": "to", "ru": "по", "kk": "пен", "zh": "至"}
+
+
+def clean_links_and_ranges(text: str, lang: str) -> str:
+    """Pre-sanitize pass: make emails/URLs speakable and keep numeric ranges from merging.
+
+    Runs BEFORE sanitize_spoken_text (which strips '@', '://' and unicode dashes), so the
+    structure is still intact here.
+    """
+    if not text:
+        return ""
+    at = _AT_WORD.get(lang, "at")
+    text = _EMAIL_RE.sub(lambda m: f"{m.group(1)} {at} {m.group(2)}", text)
+    text = _URL_SCHEME_RE.sub("", text)
+    text = _WWW_RE.sub("", text)
+    rng = _RANGE_WORD.get(lang, "to")
+    text = _RANGE_RE.sub(lambda m: f"{m.group(1)} {rng} {m.group(2)}", text)
+    return text
+
+
 def _replace_numbers(text: str, lang: str) -> str:
-    normalized = text
+    normalized = _replace_years(text, lang)
 
     def repl_digit(match: re.Match[str]) -> str:
         digit = match.group(0)

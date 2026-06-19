@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
@@ -18,8 +19,11 @@ from ..intro import (
     load_intro_blocks as _load_intro_blocks,
     safe_cache_key as _safe_cache_key,
 )
+from ..faq_video import faq_video_path as _faq_video_path
 from ..logging_config import log_event
 from ..settings import INTRO_AUDIO_CACHE_DIR, INTRO_AVATAR_CACHE_KEY
+
+_FAQ_VIDEO_NAME_RE = re.compile(r"^([0-9a-f]{24})\.mp4$")
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +52,23 @@ async def intro_cache_video(avatar: str, name: str) -> FileResponse:
     path = await _ensure_intro_video(blocks)
     if path is None or not path.exists():
         raise HTTPException(status_code=404, detail="intro video not available")
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
+
+
+@router.get("/faq-video/{avatar}/{name}")
+async def faq_cache_video(avatar: str, name: str) -> FileResponse:
+    if _safe_cache_key(avatar) != _safe_cache_key(INTRO_AVATAR_CACHE_KEY):
+        raise HTTPException(status_code=404, detail="faq video not found")
+    match = _FAQ_VIDEO_NAME_RE.match(name)
+    if not match:
+        raise HTTPException(status_code=404, detail="faq video not found")
+    path = _faq_video_path(match.group(1))
+    if not path.exists() or path.stat().st_size == 0:
+        raise HTTPException(status_code=404, detail="faq video not available")
     return FileResponse(
         path,
         media_type="video/mp4",

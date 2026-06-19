@@ -27,6 +27,7 @@ from ..utils.language import (
     UNSUPPORTED_LANGUAGE_MESSAGE,
 )
 from ..settings import (
+    FAQ_VIDEO_ENABLED,
     MAX_HISTORY_TURNS,
     SONIOX_STT_KEEPALIVE_INTERVAL_S,
     SONIOX_STT_ENDPOINT_WAIT_S,
@@ -69,6 +70,7 @@ from ..intro import (
     safe_cache_key as _safe_cache_key,
     save_intro_frames_to_cache as _save_intro_frames_to_cache,
 )
+from ..faq_video import lookup_faq_video as _lookup_faq_video
 from ..pipeline.response_stream import ResponseStream
 from ..startup import log_background_task_error as _log_background_task_error
 from ..utils.debug_io import save_response as _save_response_debug
@@ -968,7 +970,25 @@ class ClientSession:
                 # fragment. We keep the streamed fragment (can't un-speak it) and skip the
                 # winner's text to avoid doubling — log it so it's visible if it recurs.
                 log_event(log, "spoken_stream_winner_mismatch", session_id=self.session_id, request_id=turn_id, winner_source=race_result.winner.source, level=logging.WARNING)
-            if not winner_already_streamed:
+            # FAQ video cache: on a confident FAQ fast-path win, if a prebuilt MP4 exists for
+            # this exact spoken text, send it instead of rendering TTS->SyncTalk live. The MP4
+            # carries audio + frames (hardware-decoded on the client), so we skip emitting the
+            # spoken text to the avatar pipeline. Chat text still flows so the panel updates.
+            # Cache miss -> falls through to the normal live render. (FAQ never streams via
+            # on_spoken_delta, so winner_already_streamed is False on a real FAQ win.)
+            faq_video_served = False
+            if (
+                FAQ_VIDEO_ENABLED
+                and not winner_already_streamed
+                and race_result is not None
+                and race_result.winner.source == "faq"
+            ):
+                faq_url = _lookup_faq_video(spoken, language)
+                if faq_url:
+                    await self.writer.send({"type": "faq_video", "url": faq_url, "turn_id": turn_id})
+                    log_event(log, "faq_video_served", session_id=self.session_id, request_id=turn_id, url=faq_url)
+                    faq_video_served = True
+            if not winner_already_streamed and not faq_video_served:
                 await stream.emit_spoken_text(spoken)
             if chat:
                 await stream.emit_chat_text(chat)

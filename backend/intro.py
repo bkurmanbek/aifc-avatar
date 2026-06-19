@@ -463,6 +463,67 @@ def build_intro_video(blocks: list[IntroBlock]) -> Path | None:
         return _build_intro_video_locked(blocks)
 
 
+def encode_frames_to_mp4(frames: list[str], wav_bytes: bytes, out_path: Path, fps: int = 25) -> bool:
+    """Mux base64-JPEG ``frames`` + a WAV (``wav_bytes``) into an H.264/AAC MP4 at
+    ``out_path``. Returns True on success. Shared by the intro and FAQ video caches.
+
+    ffmpeg stderr goes to a sidecar file, never PIPE: we stream up to ~hundreds of MB of
+    JPEG bytes to stdin on this thread, and a full stderr pipe buffer would stall ffmpeg
+    and deadlock the write.
+    """
+    if not frames:
+        return False
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_audio = out_path.with_suffix(".audio.wav")
+    tmp_out = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp_err = out_path.with_suffix(".ffmpeg.log")
+    tmp_audio.write_bytes(wav_bytes)
+
+    cmd = [
+        _ffmpeg_bin(), "-y",
+        "-f", "image2pipe", "-framerate", str(fps), "-i", "pipe:0",
+        "-i", str(tmp_audio),
+        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        "-shortest", "-movflags", "+faststart",
+        "-f", "mp4",  # tmp_out ends in .mp4.tmp; ffmpeg can't infer the muxer from that
+        str(tmp_out),
+    ]
+    ret = -1
+    try:
+        with open(tmp_err, "wb") as err:
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err)
+            assert proc.stdin is not None
+            try:
+                for frame in frames:
+                    proc.stdin.write(base64.b64decode(frame))
+                proc.stdin.close()
+                ret = proc.wait(timeout=300)
+            except Exception:
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=10)
+                raise
+    except Exception:
+        log.exception("frames->mp4 ffmpeg failed: %s", _tail_text(tmp_err))
+        for path in (tmp_audio, tmp_out, tmp_err):
+            with contextlib.suppress(Exception):
+                path.unlink(missing_ok=True)
+        return False
+
+    for path in (tmp_audio, tmp_err):
+        with contextlib.suppress(Exception):
+            path.unlink(missing_ok=True)
+    if ret != 0:
+        log.error("frames->mp4 ffmpeg exit=%s", ret)
+        with contextlib.suppress(Exception):
+            tmp_out.unlink(missing_ok=True)
+        return False
+
+    tmp_out.replace(out_path)
+    return True
+
+
 def _build_intro_video_locked(blocks: list[IntroBlock]) -> Path | None:
     frames_all: list[str] = []
     for block in blocks:
@@ -475,56 +536,9 @@ def _build_intro_video_locked(blocks: list[IntroBlock]) -> Path | None:
         return None
 
     out_path = intro_video_path()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_audio = out_path.with_suffix(".audio.wav")
-    tmp_out = out_path.with_suffix(".mp4.tmp")
-    tmp_err = out_path.with_suffix(".ffmpeg.log")
-    tmp_audio.write_bytes(_concat_block_wavs(blocks))
-
-    cmd = [
-        _ffmpeg_bin(), "-y",
-        "-f", "image2pipe", "-framerate", "25", "-i", "pipe:0",
-        "-i", str(tmp_audio),
-        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "128k",
-        "-shortest", "-movflags", "+faststart",
-        "-f", "mp4",  # tmp_out ends in .mp4.tmp; ffmpeg can't infer the muxer from that
-        str(tmp_out),
-    ]
-    # ffmpeg stderr goes to a file, never PIPE: we stream ~250MB of JPEG bytes to stdin
-    # on this thread, and a full stderr pipe buffer would stall ffmpeg and deadlock the write.
-    ret = -1
-    try:
-        with open(tmp_err, "wb") as err:
-            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err)
-            assert proc.stdin is not None
-            try:
-                for frame in frames_all:
-                    proc.stdin.write(base64.b64decode(frame))
-                proc.stdin.close()
-                ret = proc.wait(timeout=300)
-            except Exception:
-                proc.kill()
-                with contextlib.suppress(Exception):
-                    proc.wait(timeout=10)
-                raise
-    except Exception:
-        log.exception("intro video ffmpeg failed: %s", _tail_text(tmp_err))
-        for path in (tmp_audio, tmp_out, tmp_err):
-            with contextlib.suppress(Exception):
-                path.unlink(missing_ok=True)
+    if not encode_frames_to_mp4(frames_all, _concat_block_wavs(blocks), out_path):
         return None
 
-    for path in (tmp_audio, tmp_err):
-        with contextlib.suppress(Exception):
-            path.unlink(missing_ok=True)
-    if ret != 0:
-        log.error("intro video ffmpeg exit=%s", ret)
-        with contextlib.suppress(Exception):
-            tmp_out.unlink(missing_ok=True)
-        return None
-
-    tmp_out.replace(out_path)
     _intro_video_meta_path().write_text(
         json.dumps({"signature": intro_video_signature(blocks)}, ensure_ascii=False), encoding="utf-8"
     )

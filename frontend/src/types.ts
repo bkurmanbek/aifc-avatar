@@ -14,6 +14,7 @@ export type WsInbound =
   | { type: 'audio_ready'; data?: string; audio_url?: string; chunk?: number; frame_stride?: number; turn_id?: string; cached?: boolean; expected_frames?: number }
   | { type: 'frame_cache'; url: string; chunk?: number; turn_id?: string; frame_count?: number }
   | { type: 'intro_video'; url: string; turn_id?: string }
+  | { type: 'faq_video'; url: string; turn_id?: string }
   | { type: 'frame'; data: string; chunk?: number; turn_id?: string }
   | { type: 'chunk_done'; chunk?: number; turn_id?: string }
   | { type: 'media_error'; text: string; chunk?: number; turn_id?: string }

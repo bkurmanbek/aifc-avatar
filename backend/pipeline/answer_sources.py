@@ -222,6 +222,7 @@ async def faq_candidate(query: str, language: str) -> RaceCandidate | None:
                 score=float(hit.get("similarity", 0.0)),
                 citations=list(hit.get("citations") or []),
                 cacheable=True,
+                trim_spoken=False,  # speak the full FAQ answer, not just the first ~75 words
             )
     except Exception as exc:
         log.exception("FAQ candidate lookup failed")

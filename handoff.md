@@ -3,11 +3,89 @@
 _Session date: 2026-06-16. Read this first, then `CLAUDE.md`. This documents an end-to-end
 effort to kill avatar stuttering and chunk-transition gaps across the intro and answer paths._
 
-> **Update 2026-06-18 (latest) — SyncTalk render throughput optimization (~2→5 avatars/GPU). See the FIRST section below.**
+> **Update 2026-06-19 (latest) — FAQ answer video cache (~720ms vs ~7.4s) + TTS pronunciation fixes (years/ranges/emails/commas) + full-res & q95 quality bump. See the FIRST section below.**
+> **Update 2026-06-18 — SyncTalk render throughput optimization (~2→5 avatars/GPU).**
 > **Update 2026-06-17 — interrupt/barge-in robustness + `CODE_REVIEW.md` verdict.**
 > **Update 2026-06-17 (later) — public deploy + intro playback fix.**
 > **Update 2026-06-17 — resilience + control panel.**
 > The stutter work (Phases 1–5) is unchanged and still current.
+
+---
+
+## Session 2026-06-19 (latest) — FAQ answer video cache
+
+Goal: a FAQ answer is a static, identical-every-time utterance, so render it through SyncTalk
+**once** and serve a hardware-decoded MP4 on a confident FAQ fast-path win — skipping all
+TTS→SyncTalk/GPU at serve time. Built on the intro-MP4 mechanism. Full details in `CLAUDE.md`
+→ "FAQ answer video cache".
+
+### What shipped (gated by `FAQ_VIDEO_ENABLED`, default on)
+- **`backend/faq_video.py`** (mirrors `intro.py`): key/path/url helpers, `lookup_faq_video()`,
+  `build_faq_video()`. Keyed by the **exact final `spoken` string** the live path renders (same
+  `candidate_from_answer → extract_json_any → coerce_spoken_chat_payload → normalize_spoken_for_tts`
+  chain) + avatar + voice + language → build key == serve key by construction.
+- **`backend/intro.py`**: extracted shared `encode_frames_to_mp4()` (intro now calls it too; no
+  behavior change).
+- **`backend/api/routes.py`**: `GET /faq-video/{avatar}/{key}.mp4` (key validated `[0-9a-f]{24}`).
+- **`backend/session/session.py`**: on `winner.source=="faq"` + cached MP4 → send `{type:'faq_video',url}`,
+  skip `emit_spoken_text` (chat still flows), `done` 0 chunks. **Cache miss → live render (zero regression).**
+- **Frontend** (`App.tsx`, `types.ts`): `playCachedVideo()` reuses the intro `<video>`; `faqVideoActiveRef`
+  stops the 0-chunk `done` from cutting the clip; FAQ teardown folded into `stopIntroVideo`. Barge-in works.
+- **Measured: ~720 ms cached turn vs ~7384 ms live** for the same answer (~10×).
+
+### Tooling / data
+- `scripts/build_faq_videos.py` — **offline** builder for all `faq_cacheable_entries()` (the parsed
+  `_FAQ_ENTRIES`). `--dry-run`/`--limit`/`--langs`/`--force`. No startup prebuild (would burst GPU).
+- Added **3 demo FAQs** to `/home/admin-aifc/data/faq/aifc_faq_cache.txt` (outside the repo, not in git):
+  Client Office (en), Сенім музейі (kk), Astana Finance Days/АФД (ru). Parsed sim 1.0; videos built; verified serving.
+
+### Non-obvious caveats
+- `faq_candidate` tries `aifc_overview_candidate` (synthesized "what is aifc"/capability answers NOT in
+  `_FAQ_ENTRIES`) **before** the fast-path lookup → those queries are a deliberate cache miss → live render.
+- **Deployment coupling (IMPORTANT):** the backend sends `faq_video` for cached FAQs. An **old frontend
+  that lacks the `faq_video` case degrades those turns** (chat text shows, no avatar A/V). The Vercel
+  frontend was redeployed (`cd frontend && vercel deploy --prod`) with the handler — keep them in sync;
+  or set `FAQ_VIDEO_ENABLED=0` if you ever roll the frontend back.
+
+### FAQ answers now speak in FULL (not trimmed)
+`faq_candidate` passes `candidate_from_answer(..., trim_spoken=False)` so FAQ answers are spoken
+**in full** (other candidates still trim to ~4 sentences / 75 words for streaming latency via
+`_trim_for_first_spoken`). Fixed a real bug the user caught: cached FAQ videos were cut mid-answer
+because the spoken field was 75-word-capped. The video reproduces the full spoken text.
+
+### TTS pronunciation overhaul (shared `spoken_text.py` / `tts_pronunciation.py` — live AND cache)
+The number/text normalizer fed real demo text incorrectly; fixed (all in the shared path, so live
+turns and the FAQ/intro caches all benefit). Verified via a `prepare_tts_text` probe:
+- **Comma → sentence break removed.** Was splitting long clauses on commas → "…a business. Attract…"
+  (period + wrong capital). Now only `;`/`:` promote a clause to a sentence; commas stay as pauses.
+- **Natural years.** `2026`→"twenty twenty-six" (en), «две тысячи двадцать шестого года» (ru, proper
+  genitive when followed by года/году), «жиырма алтыншы жылдың» (kk ordinal) — was a flat cardinal.
+- **Numeric ranges.** `9–10`→"9 to 10" / «9 по 10» (any unicode dash) — was merging into "nine ten"
+  because the en-dash got stripped.
+- **Emails/URLs.** `a@b.kz`→"a at b.kz", strip `https://` — was "https. //…".
+- **Kazakh `10` bug.** `_spell_kk_number(10)` returned «он нөл»; now «он».
+
+### Full-res + q95 quality bump (user-requested, after an A/B)
+User noticed mouth softness + chunk-boundary "jumping". Diagnostic (`/tmp/capture_frames.py`, read-only):
+**0 duplicate frames sent**; all jump-spikes were **at chunk boundaries** (live path sub-segments into
+~24 chunks, incl. occasional 4-frame ones) — a live-path seam issue, not the cache. Mouth softness traced
+to JPEG q82 + fast-composite. A/B (`/tmp/ab_*`): **q82 12.7 Mbps → q90 17.8 Mbps (+39%), visibly cleaner
+teeth/lips**. Per measured numbers (`OPTIMIZATION_PLAN.md`): fast-composite gave ~5 avatars/GPU @ ~130 fps;
+**full-res = ~4 avatars/GPU @ ~105 fps** (no latency hit at 1 session — render still ≫ 25 fps realtime).
+- New flag **`SYNCTALK_JPEG_QUALITY`** (synctalk_server.py, local commit `2a7dfe9`; patch
+  `deploy/synctalk/0002-…`). `config.env` now: **`SYNCTALK_FAST_COMPOSITE=0` + `SYNCTALK_JPEG_QUALITY=95`**
+  (full-res, max quality). Restored to `=1`/lower for the ~5-avatar throughput mode.
+- **Caches rebuilt at full-res q95**, each as **one TTS synth + one `infer_stream`** (no internal seams,
+  unlike the live path). FAQ build already worked this way; the **intro** was changed to render a single
+  `infer_stream` over the concatenated block audio (continuous head-pose, no block seams) — 4268 frames,
+  ~170 s clip. Bench `golden/` frames are now stale (q82/fast) — re-save if you want the SSIM gate live.
+
+### State at handoff
+- **Committed to `main` and pushed.** Frontend redeployed to Vercel (has the `faq_video` handler).
+  Backend + SyncTalk restarted (FAQ_VIDEO_ENABLED=1, full-res q95) — **everything live.**
+- **Full 534-video FAQ build running in background at full-res q95** (~30–40 s/video, several hours).
+  Progress: `ls cache/faq/video/aifc-avatar-5-3min_exp_6/*.mp4 | wc -l`. 3 demos + intro already done.
+- The 3 demo FAQ entries live in `/home/admin-aifc/data/faq/aifc_faq_cache.txt` (**outside the repo**, not in git).
 
 ---
 

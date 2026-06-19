@@ -222,6 +222,28 @@ def _faq_fast_path_lookup(query: str, language: str | None = None) -> dict[str, 
     }
 
 
+def faq_cacheable_entries() -> list[dict[str, Any]]:
+    """Entries eligible for offline video pre-rendering (scripts/build_faq_videos.py).
+
+    Each returned dict carries the spoken ``answer`` and its ``language`` (may be "" for
+    fallback entries that match any conversation language — the builder renders those for
+    every supported language). One entry per parsed FAQ pair.
+    """
+    out: list[dict[str, Any]] = []
+    for entry in _FAQ_ENTRIES:
+        answer = str(entry.get("answer") or "").strip()
+        if not answer:
+            continue
+        out.append(
+            {
+                "answer": answer,
+                "language": str(entry.get("language") or "").strip(),
+                "questions": list(entry.get("questions") or []),
+            }
+        )
+    return out
+
+
 def is_capability_query(query: str) -> bool:
     return bool(_CAPABILITY_RE.search(query or ""))
 
