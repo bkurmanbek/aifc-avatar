@@ -569,10 +569,12 @@ class ClientSession:
             return
         msg_type = payload.get("type")
         # Liveness ping from the client heartbeat — reply immediately and skip the
-        # receive log so the ~5s cadence doesn't spam the event stream. Pings are
-        # deliberately NOT counted as activity by the session gate (an abandoned tab
-        # keeps pinging); only the real messages below refresh the idle timer.
+        # receive log so the ~5s cadence doesn't spam the event stream. Pings DO count as
+        # activity: a connected (pinging) tab — even a silent user who is just reading /
+        # thinking — must NOT be idle-evicted/disconnected. The gate still frees the slot
+        # when the socket actually dies (its dead-socket check), so a closed tab releases it.
         if msg_type == "ping":
+            GATE.touch(self.session_id)
             with contextlib.suppress(ClientClosedError):
                 await self.writer.send({"type": "pong", "t": payload.get("t")})
             return
@@ -974,14 +976,13 @@ class ClientSession:
                 # fragment. We keep the streamed fragment (can't un-speak it) and skip the
                 # winner's text to avoid doubling — log it so it's visible if it recurs.
                 log_event(log, "spoken_stream_winner_mismatch", session_id=self.session_id, request_id=turn_id, winner_source=race_result.winner.source, level=logging.WARNING)
-            # FAQ video cache: if a prebuilt MP4 exists for this EXACT spoken text, send it
-            # instead of rendering TTS->SyncTalk live. The MP4 carries audio + frames
-            # (hardware-decoded on the client), so we skip emitting the spoken text to the
-            # avatar pipeline; chat text still flows. Cache miss -> normal live render.
-            # Keyed on spoken text, NOT winner.source: a FAQ answer can win via the `faq`
-            # candidate OR be replayed by the `semantic_cache` (which caches the same
-            # raw_answer) — both must serve the video. Only requirement: nothing was already
-            # streamed (gemini_* stream their spoken field and can't be swapped mid-flight).
+            # FAQ video cache: if a prebuilt (near-lossless) MP4 exists for this EXACT spoken
+            # text, send it instead of rendering TTS->SyncTalk live. The MP4 carries audio +
+            # frames (hardware-decoded on the client); skip emitting spoken to the avatar
+            # pipeline, chat still flows. Cache miss -> normal live render. Keyed on spoken
+            # text, NOT winner.source: a FAQ answer can win via the `faq` candidate OR be
+            # replayed by `semantic_cache` (same raw_answer) — both must serve the video.
+            # Only requirement: nothing already streamed (gemini_* can't be swapped mid-flight).
             faq_video_served = False
             if FAQ_VIDEO_ENABLED and not winner_already_streamed:
                 faq_url = _lookup_faq_video(spoken, language)

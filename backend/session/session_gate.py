@@ -7,10 +7,11 @@ of concurrent live sessions (default 1). Extra connections are rejected with a
 ``busy`` message and closed; the frontend shows a "please wait" overlay and its
 normal reconnect loop retries until a slot frees.
 
-An admitted session that goes idle (abandoned tab) is evicted after
-``SESSION_IDLE_EVICT_S`` of no real activity, so the slot can never lock forever.
-Heartbeat pings do NOT count as activity (see ``touch`` callers); only real client
-messages do.
+A slot frees as soon as its socket dies (the dead-socket check in ``_evict_unusable``),
+so a closed/crashed tab never locks it. Heartbeat pings DO count as activity, so a
+connected client — including a silent user just reading or thinking — is never
+disconnected for being idle. ``SESSION_IDLE_EVICT_S`` only catches the rare open-but-
+non-pinging socket; raise/lower it via env, but it no longer disconnects silent users.
 """
 from __future__ import annotations
 
