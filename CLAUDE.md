@@ -43,8 +43,10 @@ bash scripts/run_ws_backend.sh
 cd frontend && npm run dev
 ```
 
-Python binary: `/home/admin-aifc/miniforge3/envs/synctalk2d/bin/python`
-Override via `WS_BACKEND_PYTHON`.
+Python binary: SyncTalk + scripts use `/home/admin-aifc/miniforge3/envs/synctalk2d/bin/python`.
+**The BACKEND must run the env that has `faiss`** — that's **base** `/home/admin-aifc/miniforge3/bin/python` (synctalk2d has NO faiss → local RAG silently fails, answers ungrounded, `plan_retrieve` collapses to ~70ms fail-fast). It's pinned via `WS_BACKEND_PYTHON=/home/admin-aifc/miniforge3/bin/python` in `.env`; `run_ws_backend.sh` sources `.env`. If you ever see `local RAG retrieve failed / No module named 'faiss'`, the backend is on the wrong env.
+
+**Soniox region:** STT+TTS auto-select the **EU PoP** when `.env` has `SONIOX_API_KEY_EU` + `SONIOX_{STT,TTS}_WEBSOCKET_EU_API` (settings.py derives the wss URLs). Measured ~37% lower TTS first-chunk latency from KZ (203ms EU vs 323ms US). EU endpoints require the EU key (region-bound). Remove the EU vars to fall back to US.
 
 ---
 
