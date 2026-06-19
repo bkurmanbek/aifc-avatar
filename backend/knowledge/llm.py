@@ -25,6 +25,38 @@ from .memory import format_conversation_memory
 
 log = logging.getLogger(__name__)
 
+# Reuse ONE genai client process-wide. Creating a fresh genai.Client() per turn added
+# ~240ms/turn, and the FIRST call on any new client pays a ~6s TLS/auth cold start — the
+# source of the TTFT spikes. A single warm, reused client keeps the connection hot so that
+# cold start happens once (prewarmed at boot via prewarm_gemini), not on a user's turn.
+_GENAI_CLIENT = None
+
+
+def _get_genai_client():
+    global _GENAI_CLIENT
+    if _GENAI_CLIENT is None:
+        _GENAI_CLIENT = genai.Client()
+    return _GENAI_CLIENT
+
+
+async def prewarm_gemini() -> None:
+    """Warm the shared genai client connection at startup so the first real turn doesn't
+    eat the ~6s cold-start. Cheap (1 output token)."""
+    if genai is None or types is None:
+        return
+    started = perf_counter()
+    try:
+        client = _get_genai_client()
+        cfg = types.GenerateContentConfig(max_output_tokens=1)
+        stream = await client.aio.models.generate_content_stream(
+            model=GEMINI_MODEL, contents=[{"role": "user", "parts": [{"text": "hi"}]}], config=cfg
+        )
+        async for _chunk in stream:
+            break
+        log.info("gemini prewarm complete in %dms", int((perf_counter() - started) * 1000))
+    except Exception as exc:
+        log.warning("gemini prewarm failed: %s", exc)
+
 
 def _extract_json_payload(raw: str) -> dict[str, Any] | None:
     raw = (raw or "").strip()
@@ -179,7 +211,7 @@ async def stream_answer(history_msgs: list[dict[str, str]], prompt: str) -> Asyn
     )
     try:
         if genai is not None and types is not None:
-            client = genai.Client()
+            client = _get_genai_client()
             config = types.GenerateContentConfig(
                 temperature=GEMINI_TEMPERATURE,
                 max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS,

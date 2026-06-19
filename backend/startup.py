@@ -6,6 +6,7 @@ import logging
 from time import perf_counter
 
 from .knowledge.rag import fast_answer_plan_retrieve
+from .knowledge.llm import prewarm_gemini
 from .settings import (
     LOCAL_RAG_PREWARM_QUERY,
     LOCAL_RAG_STARTUP_PREWARM,
@@ -34,5 +35,7 @@ async def _prewarm_local_rag() -> None:
 
 async def startup_prewarm() -> None:
     await _prewarm_local_rag()
+    # Warm the Gemini client connection so the first user turn doesn't eat the ~6s cold start.
+    await prewarm_gemini()
 
 
