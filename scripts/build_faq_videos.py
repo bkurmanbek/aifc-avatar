@@ -34,7 +34,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.faq_video import build_faq_video, faq_video_key, faq_video_path  # noqa: E402
-from backend.knowledge.faq import faq_cacheable_entries  # noqa: E402
+from backend.knowledge.faq import faq_cacheable_entries, faq_spoken_form  # noqa: E402
 from backend.media.synctalk import SyncTalkClient  # noqa: E402
 from backend.media.tts import SonioxRealtimeTTS  # noqa: E402
 from backend.pipeline.answer_common import candidate_from_answer  # noqa: E402
@@ -66,6 +66,7 @@ async def compute_spoken(answer: str, language: str) -> str:
         score=1.0,
         cacheable=True,
         trim_spoken=False,  # must match faq_candidate so build key == serve key
+        spoken_override=faq_spoken_form(answer),  # voice the spoken sidecar rewrite
     )
     payload = extract_json_any(cand.raw_answer)
     if isinstance(payload, dict):

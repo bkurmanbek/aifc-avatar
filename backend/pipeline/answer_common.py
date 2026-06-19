@@ -331,6 +331,7 @@ def candidate_from_answer(
     citations: list[str] | None = None,
     cacheable: bool = False,
     trim_spoken: bool = True,
+    spoken_override: str | None = None,
 ) -> RaceCandidate:
     chunks = chunks or []
     citations = citations if citations is not None else _citations(chunks)
@@ -338,8 +339,14 @@ def candidate_from_answer(
     # the streaming path (the rest streams in after). A pre-baked FAQ answer has no streaming
     # continuation, so trimming there just drops the tail — FAQ passes trim_spoken=False to
     # speak the full answer.
+    # spoken_override: a precomputed, already-pronounceable spoken form (FAQ uses its spoken
+    # sidecar — numbers spelled, abbreviations expanded) so chat keeps the written `answer`
+    # while the voice uses the rewritten text. There is no number normalizer downstream.
     chat_answer = sanitize_spoken_text(answer, keep_digits=True)
-    spoken = _trim_for_first_spoken(answer) if trim_spoken else (chat_answer or _trim_for_first_spoken(answer))
+    if spoken_override and spoken_override.strip():
+        spoken = spoken_override.strip()
+    else:
+        spoken = _trim_for_first_spoken(answer) if trim_spoken else (chat_answer or _trim_for_first_spoken(answer))
     chat_answer = chat_answer or spoken
     return RaceCandidate(
         source=source,

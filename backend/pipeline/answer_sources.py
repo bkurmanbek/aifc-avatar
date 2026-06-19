@@ -13,7 +13,7 @@ from typing import Any
 from ..logging_config import log_event, preview_text
 from ..external_rag import query_external_rag
 from ..knowledge.cache import _semantic_answer_cache_lookup, _semantic_answer_cache_put, clear_semantic_answer_cache
-from ..knowledge.faq import _faq_fast_path_lookup
+from ..knowledge.faq import _faq_fast_path_lookup, faq_spoken_form
 from ..knowledge.llm import _extract_json_from_wrapped, _extract_json_payload, build_prompt, stream_answer
 from ..knowledge.rag import fast_answer_plan_retrieve
 from ..settings import (
@@ -214,15 +214,19 @@ async def faq_candidate(query: str, language: str) -> RaceCandidate | None:
     try:
         hit = await asyncio.to_thread(_faq_fast_path_lookup, query, language)
         if hit and float(hit.get("similarity", 0.0)) >= FAQ_WIN_THRESHOLD:
+            faq_answer = str(hit.get("answer", ""))
             return candidate_from_answer(
                 source="faq",
-                answer=str(hit.get("answer", "")),
+                answer=faq_answer,
                 language=language,
                 confidence="high",
                 score=float(hit.get("similarity", 0.0)),
                 citations=list(hit.get("citations") or []),
                 cacheable=True,
                 trim_spoken=False,  # speak the full FAQ answer, not just the first ~75 words
+                # Voice the pronounceable spoken rewrite (numbers spelled, abbreviations
+                # expanded); chat still shows the written answer. None -> fall back to answer.
+                spoken_override=faq_spoken_form(faq_answer),
             )
     except Exception as exc:
         log.exception("FAQ candidate lookup failed")

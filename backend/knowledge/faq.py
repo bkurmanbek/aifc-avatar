@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 from pathlib import Path
@@ -10,6 +12,38 @@ from ..settings import DATA_DIR
 log = logging.getLogger(__name__)
 
 _FAQ_CACHE_PATH = DATA_DIR / "faq" / "aifc_faq_cache.txt"
+# Spoken-only sidecar: maps sha256(answer) -> an already-pronounceable spoken rewrite of the
+# answer (numbers/dates/ordinals spelled out, abbreviations expanded), in the answer's language.
+# Built offline by scripts/rewrite_faq_spoken.py. The chat panel still shows the original
+# written answer; only the VOICE uses this. Lets us drop the regex number normalizer.
+_FAQ_SPOKEN_PATH = DATA_DIR / "faq" / "aifc_faq_spoken.json"
+_FAQ_SPOKEN_MAP: dict[str, Any] | None = None
+
+
+def _answer_hash(answer: str) -> str:
+    return hashlib.sha256((answer or "").strip().encode("utf-8")).hexdigest()
+
+
+def _load_faq_spoken() -> dict[str, Any]:
+    global _FAQ_SPOKEN_MAP
+    if _FAQ_SPOKEN_MAP is None:
+        try:
+            _FAQ_SPOKEN_MAP = json.loads(_FAQ_SPOKEN_PATH.read_text(encoding="utf-8")) if _FAQ_SPOKEN_PATH.exists() else {}
+            log.info("loaded %d FAQ spoken rewrites from %s", len(_FAQ_SPOKEN_MAP), _FAQ_SPOKEN_PATH)
+        except Exception:
+            log.exception("FAQ spoken sidecar unreadable: %s", _FAQ_SPOKEN_PATH)
+            _FAQ_SPOKEN_MAP = {}
+    return _FAQ_SPOKEN_MAP
+
+
+def faq_spoken_form(answer: str) -> str | None:
+    """Precomputed pronounceable spoken form for a FAQ answer, or None (fall back to the answer)."""
+    entry = _load_faq_spoken().get(_answer_hash(answer))
+    if isinstance(entry, dict):
+        return (str(entry.get("spoken") or "")).strip() or None
+    if isinstance(entry, str):
+        return entry.strip() or None
+    return None
 _WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі0-9]+|[一-鿿]", re.UNICODE)
 _FAQ_LANGUAGE_RE = re.compile(r"^Language:\s+.+\(([^)]+)\)\s*$")
 _FAQ_INDEX_RE = re.compile(r"^\[\d+\]\s*$")

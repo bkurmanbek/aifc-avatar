@@ -185,6 +185,13 @@ Lives in the **separate SyncTalk repo** `synctalk_server.py` (`/infer_stream`); 
 - **Measured dead-ends (do NOT retry without re-benchmarking):** BF16/TensorRT (GPU forward already 15× faster than the pipeline), NVENC H.264 (no encoder on H200), software libx264 (~15 ms/f, and JPEG bandwidth fits the uplink at 5 streams), GPU nvJPEG (net loss in-pipeline). The remaining bottleneck is CPU JPEG `imencode` (~1.83 ms/f); beyond ~5 avatars, scale via more GPUs + a router.
 - **`_AVATAR_WORKER_COUNT = 2`** (`response_stream.py`) pipelines *across* chunks; the above pipelines *within* one `/infer_stream` call. Independent.
 
+### Spoken-text pronunciation (LLM-as-normalizer, no regex)
+Pronunciation (numbers, dates, ordinals, abbreviations) is handled at GENERATION time, not by a regex normalizer. The old `normalize_spoken_numbers` mangled ordinals ("9th"→"nineth", "10th"→"onezeroth") and was **removed** from `prepare_tts_text` (now sanitize + link/range cleanup + sentenceize only — still on every TTS path).
+- **Live:** `build_prompt` (`llm.py`) forces the `spoken` field to spell ALL numbers/dates/ordinals/money/percentages as words and expand abbreviations to full spoken forms (compact `_ABBR_HINT` map injected; full list `data/abbr.txt`). The `chat` field keeps normal written form (digits, "AIFC").
+- **FAQ:** a spoken-only sidecar `data/faq/aifc_faq_spoken.json` (`{sha256(answer): {spoken, lang}}`) holds an LLM rewrite of each answer into pronounceable form. `faq.py faq_spoken_form()` loads it; `candidate_from_answer(spoken_override=...)` voices the rewrite while `chat` stays the original written answer. The scraped FAQ source (`aifc_faq_cache.txt`) is NOT mutated.
+- **Regenerate** the sidecar after editing FAQ answers: `python scripts/rewrite_faq_spoken.py` (resumable, additive, ~518 unique answers). Then rebuild any affected FAQ videos — the cache key is derived from the (now rewritten) spoken text, so changing it changes the key.
+- Do NOT re-add a regex number/abbreviation normalizer. If a stray digit reaches TTS, fix the prompt / sidecar instead. The FAQ video build (`build_faq_videos.py compute_spoken`) uses the same `faq_spoken_form` so build key == serve key.
+
 ### SyncTalk checkpoint
 Current: `aifc-avatar-5-3min_exp_6` — 5747 frames (229s head cycle), better visual quality than the previous 27s cycle checkpoint. Located at `/home/admin-aifc/SyncTalk_2D/checkpoint/aifc-avatar-5-3min_exp_6/`.
 

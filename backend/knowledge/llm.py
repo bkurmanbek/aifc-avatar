@@ -104,6 +104,22 @@ def _fallback_instruction(language: str) -> str:
     )
 
 
+# Compact abbreviation -> full-spoken-form hints injected into the spoken-field rules so the
+# LLM voices full names, not letters. (Full list: data/abbr.txt; the LLM expands others it knows.)
+_ABBR_HINT = (
+    "AIFC = Astana International Financial Centre; AFSA = Astana Financial Services Authority; "
+    "AIX = Astana International Exchange; IAC = AIFC International Arbitration Centre; "
+    "AIFCA = AIFC Authority; AEC = AIFC Energy Centre; AFD = Astana Finance Days; "
+    "AML = Anti-Money Laundering; CTF = Counter-Terrorism Financing; KYC = Know Your Customer; "
+    "IIN = Individual Identification Number; EDS = Electronic Digital Signature; VAT = Value Added Tax; "
+    "JSC = Joint Stock Company; CEO = Chief Executive Officer; GDP = Gross Domestic Product; "
+    "ESG = Environmental, Social and Governance; MCI = Monthly Calculation Index; "
+    "TRP = Temporary Residence Permit; KZT = Kazakhstani tenge; USD = US dollars; "
+    "RK = Republic of Kazakhstan; UAE = United Arab Emirates; EU = European Union; "
+    "UK = United Kingdom; USA = United States; UN = United Nations"
+)
+
+
 def build_prompt(
     query: str,
     language: str,
@@ -168,10 +184,20 @@ def build_prompt(
         "- Use plain speakable text only: no markdown, bullets, lists, JSON, citations, or source labels.\n"
         "- Do not start with phrases like \"according to the context\" or \"based on the provided information\".\n"
         "- Include the exact AIFC body, department, service, fee, threshold, date, or timeframe when it directly answers the question.\n"
-        "- Write numbers as words for TTS. In Chinese, use Chinese number characters.\n"
-        "- For abbreviations, use the expanded name or natural pronunciation text when it is clearer for speech.\n"
-        "- For domains, write the normal domain form such as aifc.kz.\n\n"
+        "- spoken is read by TEXT-TO-SPEECH, so it MUST be already pronounceable — there is NO\n"
+        "  number/abbreviation normalizer downstream. Therefore in spoken you MUST:\n"
+        "  * Write EVERY number, date, ordinal, money amount, percentage and range as spoken\n"
+        "    WORDS in the answer's language — never digits or symbols. Examples (English):\n"
+        "    \"9-10\" -> \"the ninth to the tenth\"; \"2026\" -> \"twenty twenty-six\"; \"$5M\" ->\n"
+        "    \"five million dollars\"; \"50%\" -> \"fifty percent\"; \"3.5\" -> \"three point five\";\n"
+        "    \"14:30\" -> \"two thirty PM\". In Chinese use Chinese number words.\n"
+        "  * Expand EVERY abbreviation/acronym to its full spoken form in the answer's language\n"
+        "    (do NOT speak the letters). Known AIFC expansions: " + _ABBR_HINT + ". Expand any\n"
+        "    other acronym you recognise; if unsure, use the natural full name.\n"
+        "  * Say emails/URLs naturally (for example, \"aifc dot k z\").\n\n"
         "Rules for chat:\n"
+        "- chat keeps NORMAL WRITTEN form: digits, %, $, dates, and standard abbreviations\n"
+        "  (AIFC, AFSA, AIX) are fine and preferred for readability.\n"
         "- Provide the full detailed answer for the chat panel.\n"
         "- Markdown is allowed: short paragraphs, bullets, and small headings are fine.\n"
         "- Keep it focused on the user's exact question and retrieved facts.\n"
