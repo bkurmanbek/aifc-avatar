@@ -47,6 +47,7 @@ async def websocket_endpoint(websocket: WebSocket):
         await session.close()
         return
     await writer.send({"type": "session_state", "session_id": session.session_id, "state": "connected"})
+    session.start_client_keepalive()  # server->client heartbeat so the watchdog only fires on a dead conn
     session.start_intro(intro_token or None)
     session.prewarm_realtime_stt(force=True)
     session.prewarm_realtime_tts()

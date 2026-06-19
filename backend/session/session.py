@@ -88,6 +88,13 @@ _DUP_QUERY_WINDOW_S = 1.5
 # keeps reading messages (answering heartbeat pings) and consuming mic audio. Without
 # this bound a slow interrupt starves pings → the client watchdog force-closes the WS.
 _INTERRUPT_TEARDOWN_TIMEOUT_S = 1.5
+# Server-initiated keepalive to the client. The frontend watchdog force-closes the socket
+# after WS_HEARTBEAT_TIMEOUT_MS (12s) with NO inbound traffic. Relying only on pong-on-ping
+# is fragile: a backgrounded tab throttles the client's 5s ping timer, and a transient tunnel
+# stall can swallow a pong — both spuriously trip the watchdog. Sending a tiny message every
+# few seconds (any message re-arms the client watchdog) means it only fires on a truly dead
+# connection. 4s << 12s leaves headroom for ~2 dropped keepalives.
+_CLIENT_KEEPALIVE_S = 4.0
 
 
 def _summarize_client_payload(payload: dict) -> dict:
@@ -125,6 +132,7 @@ class ClientSession:
     realtime_stt_ready_at: float | None = None
     realtime_stt_audio_started_at: float | None = None
     stt_keepalive_task: asyncio.Task | None = None
+    client_keepalive_task: asyncio.Task | None = None
     stt_prewarm_task: asyncio.Task | None = None
     tts_prewarm_task: asyncio.Task | None = None
     _stt_start_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -213,6 +221,28 @@ class ClientSession:
                 with contextlib.suppress(ClientClosedError):
                     await self.writer.send({"type": "status", "text": "Transcribing..."})
             return session
+
+    def start_client_keepalive(self) -> None:
+        """Begin a server-initiated keepalive to the browser so its watchdog only fires on a
+        genuinely dead connection (see _CLIENT_KEEPALIVE_S)."""
+        if self.client_keepalive_task is not None and not self.client_keepalive_task.done():
+            return
+        self.client_keepalive_task = asyncio.create_task(self._client_keepalive_loop())
+
+    async def _client_keepalive_loop(self) -> None:
+        try:
+            while not self.writer.closed:
+                await asyncio.sleep(_CLIENT_KEEPALIVE_S)
+                if self.writer.closed:
+                    return
+                # Any inbound message re-arms the client watchdog; an unsolicited pong is
+                # ignored by the frontend (no matching ping `t`).
+                with contextlib.suppress(ClientClosedError, Exception):
+                    await self.writer.send({"type": "pong", "t": None})
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("client keepalive loop failed")
 
     def _start_stt_keepalive(self) -> None:
         if self.stt_keepalive_task is not None and not self.stt_keepalive_task.done():
@@ -500,6 +530,11 @@ class ClientSession:
             await self.websocket.close(code=1000)
 
     async def close(self) -> None:
+        if self.client_keepalive_task is not None:
+            self.client_keepalive_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self.client_keepalive_task
+            self.client_keepalive_task = None
         await self._close_realtime_stt(reason="session_close")
         if self.pipeline_task is not None:
             self.pipeline_task.cancel()
