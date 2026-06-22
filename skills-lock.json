@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "skills": {
+    "liveavatar-debug": {
+      "source": "heygen-com/liveavatar-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/liveavatar-debug/SKILL.md",
+      "computedHash": "a316921b032d2a3c76eb7fbb8982407432ee65809c62e83bc70d0a726f3a7312"
+    },
+    "liveavatar-feedback": {
+      "source": "heygen-com/liveavatar-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/liveavatar-feedback/SKILL.md",
+      "computedHash": "263b44cbee840ebde6cc76cfccb061feb5e22230b148571350805348f484f4fc"
+    },
+    "liveavatar-integrate": {
+      "source": "heygen-com/liveavatar-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/liveavatar-integrate/SKILL.md",
+      "computedHash": "2707f8f65c9b29eaf8ae025282f656a1e40b37a7595f348a3d324223055fdf89"
+    }
+  }
+}
