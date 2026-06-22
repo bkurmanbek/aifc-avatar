@@ -21,6 +21,7 @@ let ws: WebSocket | null = null;
 let wsConnected = false;
 let sending = false;
 let keepAlive: number | undefined;
+let sessionToken = "";
 
 const setStatus = (s: string) => (statusEl.textContent = s);
 
@@ -37,6 +38,7 @@ async function start() {
     startBtn.disabled = false;
     return;
   }
+  sessionToken = s.sessionToken || ""; // kept for teardown (POST /v1/sessions/stop)
 
   // 1) Video (+ avatar audio) via LiveKit. start() is a user gesture → audio may autoplay.
   room = new Room();
@@ -135,5 +137,13 @@ stopBtn.onclick = () => interrupt();
 input.addEventListener("keydown", (e) => { if (e.key === "Enter") speakBtn.click(); });
 
 window.addEventListener("beforeunload", () => {
-  try { if (keepAlive) clearInterval(keepAlive); ws?.close(); room?.disconnect(); } catch {}
+  try {
+    if (keepAlive) clearInterval(keepAlive);
+    // Stop the LiveAvatar session immediately (else it lingers until the 5-min idle timeout).
+    if (sessionToken) {
+      navigator.sendBeacon("/api/stop", new Blob([JSON.stringify({ sessionToken })], { type: "application/json" }));
+    }
+    ws?.close();
+    room?.disconnect();
+  } catch { /* ignore */ }
 });

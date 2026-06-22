@@ -59,7 +59,9 @@ vercel deploy --prod
    keeps it alive (`session.keep_alive` every 2 min).
 4. Type text → `POST /api/tts` → Gemini Sulafat returns base64 **PCM 24 kHz** → the browser splits it
    into 600 ms + 1 s chunks and sends `agent.speak` (same `event_id`) then `agent.speak_end`.
-5. Stop = `agent.interrupt` + halt the send loop. Teardown = `DELETE /v1/sessions` (server) on unload.
+5. Stop = `agent.interrupt` + halt the send loop. Teardown on unload = `sendBeacon('/api/stop')` →
+   server `POST /v1/sessions/stop` (Bearer) so the session stops immediately instead of lingering to
+   the 5-min idle timeout. (The guide's `DELETE /v1/sessions` returns 405 — `POST .../stop` is correct.)
 
 ## Notes / assumptions to verify with your key
 
